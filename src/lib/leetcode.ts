@@ -16,6 +16,11 @@ type GraphQlSubmission = {
   questionId: string;
 };
 
+type SubmissionListResponse = {
+  submissions: GraphQlSubmission[];
+  hasNext: boolean;
+};
+
 type QuestionDetails = {
   questionFrontendId: string;
   difficulty: Difficulty;
@@ -62,6 +67,13 @@ async function fetchQuestionDetails(titleSlug: string): Promise<QuestionDetails 
 }
 
 export async function importFromLeetCodeGraphQl(username: string): Promise<ImportedProblem[]> {
+  const paginated = await tryImportFromSubmissionList(username);
+  if (paginated.length > 0) return paginated;
+
+  return importFromRecentSubmissions(username);
+}
+
+async function importFromRecentSubmissions(username: string): Promise<ImportedProblem[]> {
   const query = `
     query userRecentSubmissions($username: String!) {
       matchedUser(username: $username) {
@@ -97,6 +109,64 @@ export async function importFromLeetCodeGraphQl(username: string): Promise<Impor
   }
 
   const entries = [...uniqueBySlug.values()].slice(0, 30);
+  return hydrateImportedProblems(entries);
+}
+
+async function tryImportFromSubmissionList(username: string): Promise<ImportedProblem[]> {
+  const query = `
+    query userSubmissionList($username: String!, $offset: Int!, $limit: Int!) {
+      matchedUser(username: $username) {
+        username
+        submitStatsGlobal {
+          acSubmissionNum {
+            count
+          }
+        }
+      }
+      submissionList(username: $username, offset: $offset, limit: $limit) {
+        submissions {
+          title
+          titleSlug
+          timestamp
+          statusDisplay
+          questionId
+        }
+        hasNext
+      }
+    }
+  `;
+
+  const uniqueBySlug = new Map<string, GraphQlSubmission>();
+  let offset = 0;
+  const limit = 20;
+  for (let page = 0; page < 6; page += 1) {
+    const data = await postGraphQl<{
+      matchedUser: { username: string } | null;
+      submissionList: SubmissionListResponse | null;
+    }>(query, { username, offset, limit });
+    if (!data.matchedUser || !data.submissionList) {
+      break;
+    }
+    for (const submission of data.submissionList.submissions) {
+      if (submission.statusDisplay !== "Accepted") continue;
+      if (!uniqueBySlug.has(submission.titleSlug)) {
+        uniqueBySlug.set(submission.titleSlug, submission);
+      }
+    }
+    if (!data.submissionList.hasNext || uniqueBySlug.size >= 120) {
+      break;
+    }
+    offset += limit;
+  }
+
+  const entries = [...uniqueBySlug.values()].slice(0, 120);
+  if (entries.length === 0) return [];
+  return hydrateImportedProblems(entries);
+}
+
+async function hydrateImportedProblems(
+  entries: GraphQlSubmission[]
+): Promise<ImportedProblem[]> {
   const detailPairs = await Promise.all(
     entries.map(async (entry) => {
       try {

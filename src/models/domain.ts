@@ -54,6 +54,9 @@ export interface KnowledgePoint {
   tags: string[];
   importance: Importance;
   confidence: 1 | 2 | 3 | 4 | 5;
+  reviewIntervalDays?: number;
+  nextReviewDate?: string;
+  lastReviewedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -64,6 +67,9 @@ export interface CalendarEvent {
   type: EventType;
   startTime: string;
   endTime: string;
+  recurrence?: "none" | "daily" | "weekly" | "monthly";
+  recurrenceUntil?: string;
+  reminderMinutesBefore?: number;
   description?: string;
   linkedModule?: "leetcode" | "reading" | "notes" | "groups";
   linkedItemId?: string;
@@ -84,6 +90,14 @@ export interface StudyGroup {
 export interface UserSettings {
   aiEnabled: boolean;
   notificationsEnabled: boolean;
+  dailyDigestEnabled: boolean;
+  dailyDigestTime: string;
+  eventRemindersEnabled: boolean;
+  reviewRemindersEnabled: boolean;
+  streakRemindersEnabled: boolean;
+  quietHoursEnabled: boolean;
+  quietHoursStart: string;
+  quietHoursEnd: string;
   themePreference: ThemePreference;
   leetCodeUsername: string;
   aiApiKey: string;
@@ -95,6 +109,8 @@ export interface LeetCodeSyncMetadata {
   method: "none" | "graphql" | "scrape" | "manual";
   lastSyncAt?: string;
   lastImportedCount?: number;
+  lastMergedCount?: number;
+  lastCreatedCount?: number;
   scrapeSolvedCount?: number;
   consecutiveFailures: number;
   lastError?: string;
@@ -102,11 +118,26 @@ export interface LeetCodeSyncMetadata {
   activeStep?: "graphql" | "scrape" | "manual";
 }
 
+export interface SyncHistoryEntry {
+  at: string;
+  method: "graphql" | "scrape" | "manual";
+  status: "success" | "error";
+  importedCount?: number;
+  createdCount?: number;
+  mergedCount?: number;
+  invalidCount?: number;
+  message?: string;
+}
+
 export interface AppDataSnapshot {
   problems: LeetCodeProblem[];
   books: Book[];
+  knowledgePoints?: KnowledgePoint[];
   events: CalendarEvent[];
   groups: StudyGroup[];
   settings: UserSettings;
   leetCodeSyncMetadata: LeetCodeSyncMetadata;
+  topicNotes?: Record<string, string>;
+  topicResources?: Record<string, string[]>;
+  syncHistory?: SyncHistoryEntry[];
 }

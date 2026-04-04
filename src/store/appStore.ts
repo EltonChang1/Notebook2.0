@@ -6,17 +6,28 @@ import type {
   StudyGroup,
   UserSettings,
   Book,
+  KnowledgePoint,
   LeetCodeSyncMetadata,
+  SyncHistoryEntry,
 } from "../models/domain";
 import { loadSnapshot, saveSnapshot } from "../lib/db";
 import {
   fetchLeetCodeScrapeSummary,
   importFromLeetCodeGraphQl,
 } from "../lib/leetcode";
+import { previewCsvImport, type ParsedCsvProblem } from "../lib/csvImport";
 
 const defaultSettings: UserSettings = {
   aiEnabled: false,
   notificationsEnabled: false,
+  dailyDigestEnabled: true,
+  dailyDigestTime: "08:00",
+  eventRemindersEnabled: true,
+  reviewRemindersEnabled: false,
+  streakRemindersEnabled: false,
+  quietHoursEnabled: true,
+  quietHoursStart: "23:00",
+  quietHoursEnd: "07:00",
   themePreference: "dark",
   leetCodeUsername: "",
   aiApiKey: "",
@@ -51,10 +62,14 @@ type AppState = {
   hydrated: boolean;
   problems: LeetCodeProblem[];
   books: Book[];
+  knowledgePoints: KnowledgePoint[];
   events: CalendarEvent[];
   groups: StudyGroup[];
   settings: UserSettings;
   leetCodeSyncMetadata: LeetCodeSyncMetadata;
+  topicNotes: Record<string, string>;
+  topicResources: Record<string, string[]>;
+  syncHistory: SyncHistoryEntry[];
   searchQuery: string;
   topicFilter: string;
   difficultyFilter: "all" | "Easy" | "Medium" | "Hard";
@@ -70,9 +85,42 @@ type AppState = {
   setSortOrder: (value: "asc" | "desc") => void;
   upsertProblem: (input: UpsertProblemInput) => void;
   deleteProblem: (id: string) => void;
+  upsertBook: (input: Omit<Book, "id" | "createdAt"> & { id?: string }) => void;
+  deleteBook: (id: string) => void;
+  upsertKnowledgePoint: (
+    input: Omit<KnowledgePoint, "id" | "createdAt" | "updatedAt"> & { id?: string }
+  ) => void;
+  deleteKnowledgePoint: (id: string) => void;
+  upsertEvent: (input: Omit<CalendarEvent, "id" | "createdAt"> & { id?: string }) => void;
+  deleteEvent: (id: string) => void;
+  markKnowledgePointReviewResult: (id: string, result: ReviewResult) => void;
   markReviewResult: (id: string, result: ReviewResult) => void;
+  setTopicNote: (topic: string, note: string) => void;
+  setTopicResources: (topic: string, resources: string[]) => void;
   updateSettings: (patch: Partial<UserSettings>) => void;
   runLeetCodeSync: () => Promise<void>;
+  importParsedProblems: (
+    rows: ParsedCsvProblem[],
+    options?: {
+      allowMergeProblemNumbers?: number[];
+      invalidCount?: number;
+      errorSummary?: string[];
+    }
+  ) => {
+    importedCount: number;
+    createdCount: number;
+    mergedCount: number;
+    invalidCount: number;
+    skippedConflicts: number;
+  };
+  importProblemsFromCsv: (csvText: string) => {
+    importedCount: number;
+    createdCount: number;
+    mergedCount: number;
+    invalidCount: number;
+    skippedConflicts: number;
+    errors: string[];
+  };
 };
 
 const reviewSchedule = [1, 3, 7, 14, 30] as const;
@@ -150,10 +198,14 @@ function toSnapshot(state: AppState): AppDataSnapshot {
   return {
     problems: state.problems,
     books: state.books,
+    knowledgePoints: state.knowledgePoints,
     events: state.events,
     groups: state.groups,
     settings: state.settings,
     leetCodeSyncMetadata: state.leetCodeSyncMetadata,
+    topicNotes: state.topicNotes,
+    topicResources: state.topicResources,
+    syncHistory: state.syncHistory,
   };
 }
 
@@ -161,10 +213,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   hydrated: false,
   problems: [],
   books: [],
+  knowledgePoints: [],
   events: [],
   groups: [],
   settings: defaultSettings,
   leetCodeSyncMetadata: defaultLeetCodeSyncMetadata,
+  topicNotes: {},
+  topicResources: {},
+  syncHistory: [],
   searchQuery: "",
   topicFilter: "",
   difficultyFilter: "all",
@@ -181,11 +237,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       hydrated: true,
       problems: snapshot.problems,
       books: snapshot.books,
+      knowledgePoints: snapshot.knowledgePoints ?? [],
       events: snapshot.events,
       groups: snapshot.groups,
       settings: { ...defaultSettings, ...(snapshot.settings ?? {}) },
       leetCodeSyncMetadata:
         snapshot.leetCodeSyncMetadata ?? defaultLeetCodeSyncMetadata,
+      topicNotes: snapshot.topicNotes ?? {},
+      topicResources: snapshot.topicResources ?? {},
+      syncHistory: snapshot.syncHistory ?? [],
     });
   },
   setSearchQuery(value) {
@@ -272,6 +332,123 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ problems });
     void saveSnapshot(toSnapshot({ ...get(), problems }));
   },
+  upsertBook(input) {
+    const now = new Date().toISOString();
+    const current = get().books;
+    const nextBook: Book = {
+      id: input.id ?? crypto.randomUUID(),
+      title: input.title,
+      author: input.author,
+      isbn: input.isbn,
+      totalChapters: input.totalChapters,
+      status: input.status,
+      createdAt: current.find((book) => book.id === input.id)?.createdAt ?? now,
+    };
+    const books = current.some((book) => book.id === nextBook.id)
+      ? current.map((book) => (book.id === nextBook.id ? nextBook : book))
+      : [nextBook, ...current];
+    set({ books });
+    void saveSnapshot(toSnapshot({ ...get(), books }));
+  },
+  deleteBook(id) {
+    const books = get().books.filter((book) => book.id !== id);
+    const knowledgePoints = get().knowledgePoints.filter((point) => point.bookId !== id);
+    set({ books, knowledgePoints });
+    void saveSnapshot(toSnapshot({ ...get(), books, knowledgePoints }));
+  },
+  upsertKnowledgePoint(input) {
+    const now = new Date().toISOString();
+    const current = get().knowledgePoints;
+    const existing = current.find((point) => point.id === input.id);
+    let reviewIntervalDays = existing?.reviewIntervalDays;
+    let nextReviewDate = existing?.nextReviewDate;
+    let lastReviewedAt = existing?.lastReviewedAt;
+
+    if (input.confidence <= 3) {
+      reviewIntervalDays = reviewIntervalDays ?? defaultIntervalFromConfidence(input.confidence);
+      nextReviewDate = nextReviewDate ?? addDaysIso(now, reviewIntervalDays);
+    } else {
+      reviewIntervalDays = undefined;
+      nextReviewDate = undefined;
+      lastReviewedAt = undefined;
+    }
+
+    const nextPoint: KnowledgePoint = {
+      id: input.id ?? crypto.randomUUID(),
+      bookId: input.bookId,
+      title: input.title,
+      chapter: input.chapter,
+      pageSection: input.pageSection,
+      concept: input.concept,
+      tags: input.tags,
+      importance: input.importance,
+      confidence: input.confidence,
+      reviewIntervalDays,
+      nextReviewDate,
+      lastReviewedAt,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    const knowledgePoints = current.some((point) => point.id === nextPoint.id)
+      ? current.map((point) => (point.id === nextPoint.id ? nextPoint : point))
+      : [nextPoint, ...current];
+    set({ knowledgePoints });
+    void saveSnapshot(toSnapshot({ ...get(), knowledgePoints }));
+  },
+  deleteKnowledgePoint(id) {
+    const knowledgePoints = get().knowledgePoints.filter((point) => point.id !== id);
+    set({ knowledgePoints });
+    void saveSnapshot(toSnapshot({ ...get(), knowledgePoints }));
+  },
+  upsertEvent(input) {
+    const now = new Date().toISOString();
+    const current = get().events;
+    const existing = current.find((event) => event.id === input.id);
+    const nextEvent: CalendarEvent = {
+      id: input.id ?? crypto.randomUUID(),
+      title: input.title,
+      type: input.type,
+      startTime: input.startTime,
+      endTime: input.endTime,
+      recurrence: input.recurrence ?? "none",
+      recurrenceUntil: input.recurrenceUntil,
+      reminderMinutesBefore: input.reminderMinutesBefore,
+      description: input.description,
+      linkedModule: input.linkedModule,
+      linkedItemId: input.linkedItemId,
+      groupId: input.groupId,
+      createdAt: existing?.createdAt ?? now,
+    };
+    const events = current.some((event) => event.id === nextEvent.id)
+      ? current.map((event) => (event.id === nextEvent.id ? nextEvent : event))
+      : [nextEvent, ...current];
+    set({ events });
+    void saveSnapshot(toSnapshot({ ...get(), events }));
+  },
+  deleteEvent(id) {
+    const events = get().events.filter((event) => event.id !== id);
+    set({ events });
+    void saveSnapshot(toSnapshot({ ...get(), events }));
+  },
+  markKnowledgePointReviewResult(id, result) {
+    const now = new Date().toISOString();
+    const knowledgePoints = get().knowledgePoints.map((point) => {
+      if (point.id !== id) return point;
+      const interval =
+        result === "shaky"
+          ? reviewSchedule[0]
+          : nextIntervalFromCurrent(point.reviewIntervalDays);
+      return {
+        ...point,
+        reviewIntervalDays: interval,
+        nextReviewDate: addDaysIso(now, interval),
+        lastReviewedAt: now,
+        updatedAt: now,
+      };
+    });
+    set({ knowledgePoints });
+    void saveSnapshot(toSnapshot({ ...get(), knowledgePoints }));
+  },
   markReviewResult(id, result) {
     const now = new Date().toISOString();
     const problems = get().problems.map((problem) => {
@@ -292,6 +469,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
     set({ problems });
     void saveSnapshot(toSnapshot({ ...get(), problems }));
+  },
+  setTopicNote(topic, note) {
+    const topicNotes = { ...get().topicNotes, [topic]: note };
+    set({ topicNotes });
+    void saveSnapshot(toSnapshot({ ...get(), topicNotes }));
+  },
+  setTopicResources(topic, resources) {
+    const topicResources = { ...get().topicResources, [topic]: resources };
+    set({ topicResources });
+    void saveSnapshot(toSnapshot({ ...get(), topicResources }));
   },
   updateSettings(patch) {
     const settings = { ...get().settings, ...patch };
@@ -350,7 +537,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       const imported = await importFromLeetCodeGraphQl(normalizedUsername);
       let nextProblems = get().problems;
+      let createdCount = 0;
+      let mergedCount = 0;
       for (const item of imported) {
+        const alreadyExists = nextProblems.some(
+          (problem) => problem.problemNumber === item.problemNumber
+        );
         nextProblems = mergeAutoImportedProblem(nextProblems, {
           problemNumber: item.problemNumber,
           title: item.title,
@@ -362,6 +554,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           source: "auto_import",
           verified: true,
         });
+        if (alreadyExists) {
+          mergedCount += 1;
+        } else {
+          createdCount += 1;
+        }
       }
       const successState: LeetCodeSyncMetadata = {
         ...graphQlState,
@@ -369,13 +566,29 @@ export const useAppStore = create<AppState>((set, get) => ({
         method: "graphql",
         lastSyncAt: new Date().toISOString(),
         lastImportedCount: imported.length,
+        lastCreatedCount: createdCount,
+        lastMergedCount: mergedCount,
         consecutiveFailures: 0,
         lastError: undefined,
         activeStep: undefined,
       };
-      set({ problems: nextProblems, leetCodeSyncMetadata: successState });
+      const historyEntry: SyncHistoryEntry = {
+        at: successState.lastSyncAt ?? new Date().toISOString(),
+        method: "graphql",
+        status: "success",
+        importedCount: imported.length,
+        createdCount,
+        mergedCount,
+      };
+      const syncHistory = [historyEntry, ...get().syncHistory].slice(0, 20);
+      set({ problems: nextProblems, leetCodeSyncMetadata: successState, syncHistory });
       void saveSnapshot(
-        toSnapshot({ ...get(), problems: nextProblems, leetCodeSyncMetadata: successState })
+        toSnapshot({
+          ...get(),
+          problems: nextProblems,
+          leetCodeSyncMetadata: successState,
+          syncHistory,
+        })
       );
       return;
     } catch {
@@ -397,13 +610,25 @@ export const useAppStore = create<AppState>((set, get) => ({
           method: "scrape",
           lastSyncAt: new Date().toISOString(),
           lastImportedCount: 0,
+          lastCreatedCount: 0,
+          lastMergedCount: 0,
           scrapeSolvedCount: scrapeSummary.solvedCount ?? undefined,
           consecutiveFailures: 0,
           lastError: undefined,
           activeStep: undefined,
         };
-        set({ leetCodeSyncMetadata: successState });
-        void saveSnapshot(toSnapshot({ ...get(), leetCodeSyncMetadata: successState }));
+        const historyEntry: SyncHistoryEntry = {
+          at: successState.lastSyncAt ?? new Date().toISOString(),
+          method: "scrape",
+          status: "success",
+          importedCount: 0,
+          createdCount: 0,
+          mergedCount: 0,
+          message: "Scrape fallback summary only",
+        };
+        const syncHistory = [historyEntry, ...get().syncHistory].slice(0, 20);
+        set({ leetCodeSyncMetadata: successState, syncHistory });
+        void saveSnapshot(toSnapshot({ ...get(), leetCodeSyncMetadata: successState, syncHistory }));
         return;
       } catch {
         const manualState: LeetCodeSyncMetadata = {
@@ -416,9 +641,114 @@ export const useAppStore = create<AppState>((set, get) => ({
             "GraphQL and scrape failed. Use CSV/JSON manual import flow (next step).",
           consecutiveFailures: leetCodeSyncMetadata.consecutiveFailures + 1,
         };
-        set({ leetCodeSyncMetadata: manualState });
-        void saveSnapshot(toSnapshot({ ...get(), leetCodeSyncMetadata: manualState }));
+        const historyEntry: SyncHistoryEntry = {
+          at: new Date().toISOString(),
+          method: "manual",
+          status: "error",
+          message: manualState.lastError,
+        };
+        const syncHistory = [historyEntry, ...get().syncHistory].slice(0, 20);
+        set({ leetCodeSyncMetadata: manualState, syncHistory });
+        void saveSnapshot(toSnapshot({ ...get(), leetCodeSyncMetadata: manualState, syncHistory }));
       }
     }
+  },
+  importParsedProblems(rows, options) {
+    const allowMergeSet = new Set(options?.allowMergeProblemNumbers ?? []);
+    const mergeAll = !options?.allowMergeProblemNumbers;
+    let nextProblems = get().problems;
+    let importedCount = 0;
+    let createdCount = 0;
+    let mergedCount = 0;
+    let skippedConflicts = 0;
+
+    for (const row of rows) {
+      const alreadyExists = nextProblems.some(
+        (problem) => problem.problemNumber === row.problemNumber
+      );
+      if (alreadyExists && !mergeAll && !allowMergeSet.has(row.problemNumber)) {
+        skippedConflicts += 1;
+        continue;
+      }
+
+      nextProblems = mergeAutoImportedProblem(nextProblems, {
+        problemNumber: row.problemNumber,
+        title: row.title,
+        difficulty: row.difficulty,
+        topics: row.topics,
+        status: "Solved",
+        confidence: 3,
+        source: "manual",
+        verified: false,
+        dateSolved: row.dateSolved ?? new Date().toISOString(),
+      });
+      importedCount += 1;
+      if (alreadyExists) {
+        mergedCount += 1;
+      } else {
+        createdCount += 1;
+      }
+    }
+
+    const invalidCount = options?.invalidCount ?? 0;
+    const nextSync: LeetCodeSyncMetadata = {
+      ...get().leetCodeSyncMetadata,
+      status: "success",
+      method: "manual",
+      activeStep: undefined,
+      lastAttemptMethods: [...get().leetCodeSyncMetadata.lastAttemptMethods, "manual"],
+      lastSyncAt: new Date().toISOString(),
+      lastImportedCount: importedCount,
+      lastCreatedCount: createdCount,
+      lastMergedCount: mergedCount,
+      lastError:
+        invalidCount > 0 || skippedConflicts > 0
+          ? `Imported with ${invalidCount} invalid row(s) and ${skippedConflicts} skipped conflict(s).`
+          : undefined,
+    };
+    const messageParts: string[] = [];
+    if (options?.errorSummary?.length) {
+      messageParts.push(options.errorSummary.join("; "));
+    }
+    if (skippedConflicts > 0) {
+      messageParts.push(`${skippedConflicts} conflict row(s) skipped by reviewer`);
+    }
+    const historyEntry: SyncHistoryEntry = {
+      at: nextSync.lastSyncAt ?? new Date().toISOString(),
+      method: "manual",
+      status: "success",
+      importedCount,
+      createdCount,
+      mergedCount,
+      invalidCount,
+      message: messageParts.length ? messageParts.join(" | ") : "Manual import successful",
+    };
+    const syncHistory = [historyEntry, ...get().syncHistory].slice(0, 20);
+
+    set({ problems: nextProblems, leetCodeSyncMetadata: nextSync, syncHistory });
+    void saveSnapshot(
+      toSnapshot({
+        ...get(),
+        problems: nextProblems,
+        leetCodeSyncMetadata: nextSync,
+        syncHistory,
+      })
+    );
+    return { importedCount, createdCount, mergedCount, invalidCount, skippedConflicts };
+  },
+  importProblemsFromCsv(csvText) {
+    const preview = previewCsvImport(csvText, get().problems);
+    const result = get().importParsedProblems(preview.validRows, {
+      invalidCount: preview.invalidRows.length,
+      errorSummary: preview.invalidRows.slice(0, 2).map((row) => `L${row.line}: ${row.reason}`),
+    });
+    return {
+      importedCount: result.importedCount,
+      createdCount: result.createdCount,
+      mergedCount: result.mergedCount,
+      invalidCount: result.invalidCount,
+      skippedConflicts: result.skippedConflicts,
+      errors: preview.invalidRows.slice(0, 5).map((row) => `L${row.line}: ${row.reason}`),
+    };
   },
 }));
