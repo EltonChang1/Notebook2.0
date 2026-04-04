@@ -98,6 +98,7 @@ export interface Note {
   title: string;
   template: NoteTemplate;
   content: string;
+  pinned?: boolean;
   tags: string[];
   linkedModule?: "leetcode" | "reading" | "calendar" | "groups";
   linkedItemId?: string;
@@ -107,6 +108,14 @@ export interface Note {
 
 export interface UserSettings {
   aiEnabled: boolean;
+  aiProvider: "free_default" | "byok";
+  aiModel: "gemma-3" | "llama-4-scout" | "gpt-4.1-mini";
+  aiPrivacyAcknowledged: boolean;
+  aiFeatureChat: boolean;
+  aiFeatureLeetCodeHints: boolean;
+  aiFeatureReadingExplainer: boolean;
+  aiFeatureCalendarPlanner: boolean;
+  aiFeatureFlashcardGenerator: boolean;
   notificationsEnabled: boolean;
   dailyDigestEnabled: boolean;
   dailyDigestTime: string;

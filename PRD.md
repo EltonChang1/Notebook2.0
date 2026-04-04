@@ -292,6 +292,7 @@ A unified view across all books:
 |---|---|
 | **Rich Text Editor** | Markdown-based with live preview. Supports headings, bold/italic, lists, checkboxes, code blocks (syntax-highlighted), LaTeX math, and image embeds. |
 | **Quick Capture** | Global shortcut (`⌘+Shift+N`) opens a floating capture window from anywhere in the app. |
+| **AI Paste Assist** | When a user pastes a large text block, show a small non-blocking popup offering AI summarization. User can choose output style (bullet knowledge points or paragraph summary), then choose insertion behavior (replace original block or insert summary below original content). |
 | **Tagging** | Apply tags to notes for organization. Tags are shared across modules. |
 | **Pinning** | Pin important notes to the top of the list. |
 | **Linking** | Link notes to LeetCode problems, knowledge points, or calendar events using `[[wikilink]]` syntax. |
@@ -304,6 +305,33 @@ Pre-built templates for common CS student needs:
 - **Algorithm Notes** — Problem, approach, time/space complexity, code, edge cases
 - **Meeting Notes** — Date, attendees, agenda, decisions, follow-ups
 - **Weekly Reflection** — What went well, what didn't, goals for next week
+
+#### 4.4.3 AI Paste Assist (Large Paste Summarizer)
+
+**Trigger condition:**
+- Detect large pasted content in Notes editor (default threshold: > 800 characters or > 8 lines, configurable).
+- Show a compact popup near the editor toolbar after paste:
+  - "Summarize this pasted content?"
+
+**User choices (step-by-step):**
+1. **Summary format**
+   - **Bullet Knowledge Points** (concise list, study-oriented)
+   - **Paragraph Summary** (narrative condensed form)
+2. **Insertion behavior (after generation)**
+   - **Replace original pasted block**
+   - **Insert summary below original block**
+
+**Output behavior:**
+- AI-generated output is shown in preview before final insert.
+- User must explicitly confirm apply; no silent auto-overwrite.
+- Preserve undo/redo history so user can revert instantly.
+
+**UX requirements:**
+- Keep popup visually lightweight and non-intrusive.
+- Respect global AI settings:
+  - AI off → no prompt shown.
+  - BYOK selected with missing key → show inline setup warning.
+- Follow `styleguide.md` for spacing, borders, popup styling, button hierarchy, and focus states.
 
 ---
 
@@ -449,7 +477,19 @@ Each study group has a shared workspace with the following tabs:
   - "What LeetCode problems should I do to practice Dijkstra's algorithm?"
 - Conversation history is persisted per session and searchable.
 
-#### 4.6.6 Technical Integration
+#### 4.6.6 Notes AI Features
+
+**Large Paste Summarizer:**
+- In Notes, AI can summarize oversized pasted text with a compact decision flow.
+- Formats:
+  - Bullet knowledge points
+  - Paragraph summary
+- Post-generation actions:
+  - Replace original content
+  - Insert summary below original content
+- Must preserve editing safety (preview + confirm + undo support).
+
+#### 4.6.7 Technical Integration
 
 The AI layer is built on [claw-agent-devtools](https://github.com/instructkr/claw-code), an open-source agent harness that provides:
 
@@ -574,6 +614,8 @@ The app is fully navigable via keyboard.
 ---
 
 ## 6. UI/UX Design Guidelines
+
+> Detailed visual source of truth is `styleguide.md`. Where this section conflicts with `styleguide.md`, the style guide document takes precedence.
 
 ### 6.1 Layout
 
@@ -786,58 +828,64 @@ NotificationPreference
 
 ### Phase 1 — Foundation (Weeks 1–4)
 
-- [ ] Project scaffolding (Vite + React + TypeScript + Tailwind)
-- [ ] Design system: color tokens, typography, core components (Button, Card, Input, Modal)
-- [ ] Auth flow (sign up, sign in, sign out, forgot password — GitHub + Google + Apple OAuth)
-- [ ] Sidebar navigation + routing + bottom nav (mobile)
-- [ ] Dashboard / Home page (static layout)
-- [ ] Settings page skeleton (theme toggle, notification prefs, AI toggle, API key input)
-- [ ] i18n framework setup (react-i18next, English as base locale, extraction pipeline)
+- [x] Project scaffolding (Vite + React + TypeScript + Tailwind)
+- [x] Design system: color tokens, typography, core components (Button, Card, Input, Modal)
+- [x] Auth flow (sign up, sign in, sign out, forgot password — GitHub + Google + Apple OAuth)
+- [x] Sidebar navigation + routing + bottom nav (mobile)
+- [x] Dashboard / Home page (static layout)
+- [x] Settings page skeleton (theme toggle, notification prefs, AI toggle, API key input)
+- [x] i18n framework setup (react-i18next, English as base locale, extraction pipeline)
 
 ### Phase 2 — LeetCode Tracker (Weeks 5–9)
 
-- [ ] Problem log CRUD (add, edit, delete problems)
-- [ ] Problem table with search, sort, filter
-- [ ] Dashboard: progress ring, streak counter, heatmap
-- [ ] Topic radar chart + topic deep-dive pages
-- [ ] Spaced repetition engine + review queue
-- [ ] LeetCode auto-import: username input, GraphQL fetch, initial sync
-- [ ] Multi-layer sync resilience (GraphQL → HTML scraping → CSV fallback)
-- [ ] Ongoing sync (24h background), conflict resolution, "verified" badge, sync health monitor
-- [ ] Mobile card layout for problem log
+- [x] Problem log CRUD (add, edit, delete problems)
+- [x] Problem table with search, sort, filter
+- [x] Dashboard: progress ring, streak counter, heatmap
+- [x] Topic radar chart + topic deep-dive pages
+- [x] Spaced repetition engine + review queue
+- [x] LeetCode auto-import: username input, GraphQL fetch, initial sync
+- [x] Multi-layer sync resilience (GraphQL → HTML scraping → CSV fallback)
+- [x] Ongoing sync (24h background), conflict resolution, "verified" badge, sync health monitor
+- [x] Mobile card layout for problem log
 
 ### Phase 3 — Reading & Knowledge Tracker (Weeks 10–14)
 
-- [ ] Bookshelf view (add books, progress tracking)
-- [ ] Knowledge point CRUD with rich text + LaTeX + code blocks
-- [ ] Chapter outline navigation
-- [ ] Cross-book knowledge map + tag-based grouping
-- [ ] Flashcard review mode with spaced repetition
-- [ ] Mobile-optimized bookshelf (horizontal scroll) and accordion knowledge points
-- [ ] Export: Markdown, PDF, Anki-compatible flashcards
+- [x] Bookshelf view (add books, progress tracking)
+- [x] Knowledge point CRUD with rich text + LaTeX + code blocks
+- [x] Chapter outline navigation
+- [x] Cross-book knowledge map + tag-based grouping
+- [x] Flashcard review mode with spaced repetition
+- [x] Mobile-optimized bookshelf (horizontal scroll) and accordion knowledge points
+- [x] Export: Markdown, PDF, Anki-compatible flashcards
 
 ### Phase 4 — Calendar & Schedule (Weeks 15–19)
 
-- [ ] Day, Week, Month, Agenda views
-- [ ] Event CRUD with drag-to-create, drag-to-resize
-- [ ] Event types with color coding
-- [ ] Recurring events + academic term templates
-- [ ] Focus mode timer (Pomodoro)
-- [ ] Integration hooks (LeetCode session → log problems, Study block → capture knowledge)
-- [ ] Push notification system: daily digest, event reminders, streak reminders
-- [ ] Quiet hours, per-event reminder configuration
-- [ ] Mobile-first day/agenda views
+- [x] Day, Week, Month, Agenda views
+- [x] Event CRUD with drag-to-create, drag-to-resize
+- [x] Event types with color coding
+- [x] Recurring events + academic term templates
+- [x] Focus mode timer (Pomodoro)
+- [x] Integration hooks (LeetCode session → log problems, Study block → capture knowledge)
+- [x] Push notification system: daily digest, event reminders, streak reminders
+- [x] Quiet hours, per-event reminder configuration
+- [x] Mobile-first day/agenda views
 
 ### Phase 5 — Quick Notes & Global Polish (Weeks 20–23)
 
-- [ ] Rich text note editor (Tiptap) with code blocks, LaTeX, images
-- [ ] Note templates (Lecture Notes, Algorithm Notes, Meeting Notes, Weekly Reflection)
-- [ ] `[[Wikilink]]` system for cross-module linking
-- [ ] Global search + command palette (`⌘K`)
-- [ ] Full keyboard shortcut system
-- [ ] Dark/light theme toggle with accent color customization
-- [ ] Offline support: IndexedDB local storage, background sync
-- [ ] Performance optimization (code splitting, lazy loading, bundle analysis)
+- [x] Rich text note editor (Tiptap) with code blocks, LaTeX, images
+- [x] Note templates (Lecture Notes, Algorithm Notes, Meeting Notes, Weekly Reflection)
+- [x] `[[Wikilink]]` system for cross-module linking
+- [x] Global search + command palette (`⌘K`)
+- [x] Full keyboard shortcut system
+- [x] Dark/light theme toggle with accent color customization
+- [x] Offline support: IndexedDB local storage, background sync
+- [x] Performance optimization (code splitting, lazy loading, bundle analysis)
+
+#### Pre-Phase 6 Hardening Improvements (non-blocking, added Apr 2026)
+
+- [ ] Split major pages into route-level lazy chunks (move each page to dedicated modules for smaller initial JS payload).
+- [ ] Add e2e smoke checks for critical pre-Phase 6 flows (auth, LeetCode sync, Reading CRUD, Calendar event CRUD, Notes save/search).
+- [ ] Add accessibility sanity pass before AI expansion (focus order, ARIA naming on mobile nav/cards, color contrast check).
 
 ### Phase 6 — AI Study Assistant (Weeks 24–28)
 
@@ -852,6 +900,7 @@ NotificationPreference
 - [ ] Flashcard auto-generation from knowledge points
 - [ ] Calendar AI: smart scheduling, daily briefing generation
 - [ ] Study plan generator (goal-based, pushed to calendar)
+- [ ] Notes AI paste assist: large-paste popup, format choice (bullet/paragraph), apply mode (replace/insert-below)
 - [ ] Streaming responses for responsive UX
 - [ ] Rate limiting for free-tier users (~50 queries/day)
 

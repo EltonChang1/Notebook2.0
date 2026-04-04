@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "analyze": "tsc -b && vite build --mode analyze",
     "preview": "vite preview",
     "check": "tsc --noEmit",
     "lint": "echo 'Linting to be configured'"
@@ -22,6 +23,11 @@
   },
   "homepage": "https://github.com/EltonChang1/Notebook2.0#readme",
   "dependencies": {
+    "@supabase/supabase-js": "^2.101.1",
+    "@tiptap/extension-image": "^3.22.2",
+    "@tiptap/extension-placeholder": "^3.22.2",
+    "@tiptap/react": "^3.22.2",
+    "@tiptap/starter-kit": "^3.22.2",
     "dexie": "^4.4.2",
     "i18next": "^26.0.3",
     "react": "^19.2.4",
@@ -32,10 +38,13 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^25.5.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
+    "rollup-plugin-visualizer": "^7.0.1",
+    "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
     "vite": "^8.0.3"
   },

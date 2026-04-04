@@ -20,6 +20,14 @@ import { previewCsvImport, type ParsedCsvProblem } from "../lib/csvImport";
 
 const defaultSettings: UserSettings = {
   aiEnabled: false,
+  aiProvider: "free_default",
+  aiModel: "gemma-3",
+  aiPrivacyAcknowledged: false,
+  aiFeatureChat: true,
+  aiFeatureLeetCodeHints: true,
+  aiFeatureReadingExplainer: true,
+  aiFeatureCalendarPlanner: true,
+  aiFeatureFlashcardGenerator: true,
   notificationsEnabled: false,
   dailyDigestEnabled: true,
   dailyDigestTime: "08:00",
@@ -101,6 +109,7 @@ type AppState = {
   upsertNote: (input: Omit<Note, "id" | "createdAt" | "updatedAt"> & { id?: string }) => void;
   deleteNote: (id: string) => void;
   markKnowledgePointReviewResult: (id: string, result: ReviewResult) => void;
+  enqueueKnowledgePointsForReview: (ids: string[]) => void;
   markReviewResult: (id: string, result: ReviewResult) => void;
   setTopicNote: (topic: string, note: string) => void;
   setTopicResources: (topic: string, resources: string[]) => void;
@@ -449,6 +458,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       title: input.title,
       template: input.template,
       content: input.content,
+      pinned: input.pinned ?? existing?.pinned ?? false,
       tags: input.tags,
       linkedModule: input.linkedModule,
       linkedItemId: input.linkedItemId,
@@ -479,6 +489,23 @@ export const useAppStore = create<AppState>((set, get) => ({
         reviewIntervalDays: interval,
         nextReviewDate: addDaysIso(now, interval),
         lastReviewedAt: now,
+        updatedAt: now,
+      };
+    });
+    set({ knowledgePoints });
+    void saveSnapshot(toSnapshot({ ...get(), knowledgePoints }));
+  },
+  enqueueKnowledgePointsForReview(ids) {
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    const now = new Date().toISOString();
+    const knowledgePoints = get().knowledgePoints.map((point) => {
+      if (!idSet.has(point.id)) return point;
+      const interval = point.reviewIntervalDays ?? defaultIntervalFromConfidence(point.confidence);
+      return {
+        ...point,
+        reviewIntervalDays: interval,
+        nextReviewDate: now,
         updatedAt: now,
       };
     });

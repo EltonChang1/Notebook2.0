@@ -4,19 +4,26 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ChangeEvent,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
+import { NavLink, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { List, type RowComponentProps } from "react-window";
+import type { RowComponentProps } from "react-window";
+import { EditorContent, useEditor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import Placeholder from "@tiptap/extension-placeholder";
+import Image from "@tiptap/extension-image";
+import type { Session } from "@supabase/supabase-js";
 import type {
   BookStatus,
   CalendarEvent,
   Difficulty,
   EventType,
   Importance,
+  KnowledgePoint,
   LeetCodeProblem,
   NoteTemplate,
   ProblemStatus,
@@ -24,20 +31,48 @@ import type {
 } from "./models/domain";
 import { useAppStore } from "./store/appStore";
 import { buildCsvTemplate, previewCsvImport } from "./lib/csvImport";
+import type { AiStreamRequest } from "./lib/ai";
+import { consumeAiQuota, sanitizeAiPrompt } from "./lib/aiSafety";
+import {
+  getCurrentSession,
+  isAuthConfigured,
+  sendPasswordResetEmail,
+  signInWithEmailPassword,
+  signInWithOAuth,
+  signOutCurrentUser,
+  signUpWithEmailPassword,
+  subscribeAuthState,
+} from "./lib/auth";
 
 type NavItem = {
   to: string;
-  label: string;
+  labelKey: string;
   icon: string;
 };
 
+type AiChatMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  text: string;
+  at: string;
+};
+
+let aiModulePromise: Promise<typeof import("./lib/ai")> | null = null;
+async function* streamAiResponseLazy(request: AiStreamRequest): AsyncGenerator<string> {
+  aiModulePromise ??= import("./lib/ai");
+  const { streamAiResponse } = await aiModulePromise;
+  for await (const chunk of streamAiResponse(request)) {
+    yield chunk;
+  }
+}
+
 const navItems: NavItem[] = [
-  { to: "/", label: "Dashboard", icon: "🏠" },
-  { to: "/leetcode", label: "LeetCode", icon: "📊" },
-  { to: "/reading", label: "Reading", icon: "📚" },
-  { to: "/calendar", label: "Calendar", icon: "📅" },
-  { to: "/notes", label: "Notes", icon: "📝" },
-  { to: "/groups", label: "Groups", icon: "👥" },
+  { to: "/", labelKey: "nav.dashboard", icon: "🏠" },
+  { to: "/leetcode", labelKey: "nav.leetcode", icon: "📊" },
+  { to: "/reading", labelKey: "nav.reading", icon: "📚" },
+  { to: "/calendar", labelKey: "nav.calendar", icon: "📅" },
+  { to: "/notes", labelKey: "nav.notes", icon: "📝" },
+  { to: "/groups", labelKey: "nav.groups", icon: "👥" },
 ];
 
 function PageCard({
@@ -58,7 +93,176 @@ function PageCard({
   );
 }
 
+function AuthPage({
+  loading,
+  onAuthenticated,
+}: {
+  loading: boolean;
+  onAuthenticated: (session: Session | null) => void;
+}) {
+  const { t } = useTranslation();
+  const [mode, setMode] = useState<"signin" | "signup" | "forgot">("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
+
+  async function submitAuth(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!email.trim()) return;
+    setAuthBusy(true);
+    setAuthMessage("");
+    try {
+      if (mode === "signin") {
+        const { data, error } = await signInWithEmailPassword(email.trim(), password);
+        if (error) {
+          setAuthMessage(error.message);
+          return;
+        }
+        onAuthenticated(data.session ?? null);
+        return;
+      }
+      if (mode === "signup") {
+        const { error } = await signUpWithEmailPassword(email.trim(), password);
+        if (error) {
+          setAuthMessage(error.message);
+          return;
+        }
+        setAuthMessage("Sign-up successful. Check your inbox to confirm your account.");
+        return;
+      }
+      const { error } = await sendPasswordResetEmail(email.trim());
+      if (error) {
+        setAuthMessage(error.message);
+        return;
+      }
+      setAuthMessage("Password reset email sent.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function startOAuth(provider: "github" | "google" | "apple") {
+    setAuthBusy(true);
+    setAuthMessage("");
+    try {
+      const { error } = await signInWithOAuth(provider);
+      if (error) {
+        setAuthMessage(error.message);
+      }
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  return (
+    <div className="auth-shell">
+      <section className="auth-card">
+        <h1>Notebook 2.0</h1>
+        <p>{t("auth.subtitle")}</p>
+        {!isAuthConfigured && (
+          <div className="auth-warning">
+            <strong>Auth not configured</strong>
+            <small>
+              {t("auth.notConfigured")}
+            </small>
+          </div>
+        )}
+        <div className="auth-mode-tabs">
+          <button
+            type="button"
+            className={mode === "signin" ? "button-secondary view-active" : "button-secondary"}
+            onClick={() => setMode("signin")}
+            disabled={authBusy || loading}
+          >
+            {t("auth.signIn")}
+          </button>
+          <button
+            type="button"
+            className={mode === "signup" ? "button-secondary view-active" : "button-secondary"}
+            onClick={() => setMode("signup")}
+            disabled={authBusy || loading}
+          >
+            {t("auth.signUp")}
+          </button>
+          <button
+            type="button"
+            className={mode === "forgot" ? "button-secondary view-active" : "button-secondary"}
+            onClick={() => setMode("forgot")}
+            disabled={authBusy || loading}
+          >
+            {t("auth.forgot")}
+          </button>
+        </div>
+        <form className="auth-form" onSubmit={submitAuth}>
+          <label>
+              <span>{t("auth.email")}</span>
+            <input
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+            />
+          </label>
+          {mode !== "forgot" && (
+            <label>
+              <span>{t("auth.password")}</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                minLength={8}
+                required
+              />
+            </label>
+          )}
+          <button type="submit" disabled={authBusy || loading || !isAuthConfigured}>
+            {mode === "signin"
+              ? t("auth.signIn")
+              : mode === "signup"
+                ? t("auth.createAccount")
+                : t("auth.sendReset")}
+          </button>
+        </form>
+        <div className="auth-oauth">
+          <small>{t("auth.continueWith")}</small>
+          <div className="actions-row">
+            <button
+              type="button"
+              className="button-secondary"
+              disabled={authBusy || loading || !isAuthConfigured}
+              onClick={() => void startOAuth("github")}
+            >
+              {t("auth.github")}
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              disabled={authBusy || loading || !isAuthConfigured}
+              onClick={() => void startOAuth("google")}
+            >
+              {t("auth.google")}
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              disabled={authBusy || loading || !isAuthConfigured}
+              onClick={() => void startOAuth("apple")}
+            >
+              {t("auth.apple")}
+            </button>
+          </div>
+        </div>
+        {(authMessage || loading) && (
+          <small>{loading ? "Checking session..." : authMessage}</small>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function DashboardPage() {
+  const { t } = useTranslation();
   const problems = useAppStore((state) => state.problems);
   const settings = useAppStore((state) => state.settings);
   const syncMetadata = useAppStore((state) => state.leetCodeSyncMetadata);
@@ -103,8 +307,8 @@ function DashboardPage() {
 
   return (
     <PageCard
-      title="Dashboard"
-      subtitle="Your daily briefing: schedule, streaks, reading progress, and quick actions."
+      title={t("pages.dashboard.title")}
+      subtitle={t("pages.dashboard.subtitle")}
     >
       <div className="grid">
         <article className="tile">
@@ -394,6 +598,7 @@ function VirtualProblemRow({
   onEdit,
   onDelete,
 }: RowComponentProps<VirtualRowData>) {
+  const { t } = useTranslation();
   const problem = problems[index];
   const rowStyle: CSSProperties = {
     ...style,
@@ -412,6 +617,11 @@ function VirtualProblemRow({
       <div className="problem-cell">
         <span className={`badge badge-status-${toStatusClass(problem.status)}`}>
           {problem.status}
+        </span>
+      </div>
+      <div className="problem-cell">
+        <span className={`badge ${problem.verified ? "badge-verified" : "badge-unverified"}`}>
+          {problem.verified ? t("leetcode.verified") : t("leetcode.unverified")}
         </span>
       </div>
       <div className="problem-cell">
@@ -441,14 +651,14 @@ function VirtualProblemRow({
             className="button-secondary"
             onClick={() => onEdit(problem)}
           >
-            Edit
+            {t("common.edit")}
           </button>
           <button
             type="button"
             className="button-danger"
             onClick={() => onDelete(problem.id)}
           >
-            Delete
+            {t("common.delete")}
           </button>
         </div>
       </div>
@@ -463,6 +673,7 @@ function ProblemEditor({
   activeProblem?: LeetCodeProblem;
   onCancel: () => void;
 }) {
+  const { t } = useTranslation();
   const upsertProblem = useAppStore((state) => state.upsertProblem);
   const [form, setForm] = useState<ProblemFormState>(() =>
     activeProblem
@@ -543,7 +754,7 @@ function ProblemEditor({
     <form className="problem-form" onSubmit={onSubmit}>
       <div className="problem-form-grid">
         <label>
-          <span>Problem #</span>
+          <span>{t("leetcode.problemNumberLabel")}</span>
           <input
             value={form.problemNumber}
             onChange={(event) => onChange("problemNumber", event.target.value)}
@@ -551,7 +762,7 @@ function ProblemEditor({
           />
         </label>
         <label>
-          <span>Title</span>
+          <span>{t("leetcode.title")}</span>
           <input
             value={form.title}
             onChange={(event) => onChange("title", event.target.value)}
@@ -559,34 +770,34 @@ function ProblemEditor({
           />
         </label>
         <label>
-          <span>Difficulty</span>
+          <span>{t("leetcode.difficulty")}</span>
           <select
             value={form.difficulty}
             onChange={(event) =>
               onChange("difficulty", event.target.value as Difficulty)
             }
           >
-            <option>Easy</option>
-            <option>Medium</option>
-            <option>Hard</option>
+            <option>{t("leetcode.easy")}</option>
+            <option>{t("leetcode.medium")}</option>
+            <option>{t("leetcode.hard")}</option>
           </select>
         </label>
         <label>
-          <span>Status</span>
+          <span>{t("leetcode.status")}</span>
           <select
             value={form.status}
             onChange={(event) =>
               onChange("status", event.target.value as ProblemStatus)
             }
           >
-            <option>Solved</option>
-            <option>Attempted</option>
-            <option>Review</option>
-            <option>Stuck</option>
+            <option>{t("leetcode.solved")}</option>
+            <option>{t("leetcode.attempted")}</option>
+            <option>{t("leetcode.review")}</option>
+            <option>{t("leetcode.stuck")}</option>
           </select>
         </label>
         <label>
-          <span>Confidence (1-5)</span>
+          <span>{t("leetcode.confidenceOneToFive")}</span>
           <select
             value={form.confidence}
             onChange={(event) =>
@@ -604,7 +815,7 @@ function ProblemEditor({
           </select>
         </label>
         <label>
-          <span>Date Solved</span>
+          <span>{t("leetcode.dateSolved")}</span>
           <input
             type="date"
             value={form.dateSolved}
@@ -612,7 +823,7 @@ function ProblemEditor({
           />
         </label>
         <label>
-          <span>Time (min)</span>
+          <span>{t("leetcode.timeMin")}</span>
           <input
             type="number"
             min={1}
@@ -621,24 +832,24 @@ function ProblemEditor({
           />
         </label>
         <label>
-          <span>Solution Link</span>
+          <span>{t("leetcode.solutionLink")}</span>
           <input
             type="url"
-            placeholder="https://..."
+            placeholder={t("leetcode.solutionLinkPlaceholder")}
             value={form.solutionLink}
             onChange={(event) => onChange("solutionLink", event.target.value)}
           />
         </label>
         <label className="full-width">
-          <span>Topics (comma-separated)</span>
+          <span>{t("leetcode.topicsCommaSeparated")}</span>
           <input
             value={form.topics}
-            placeholder="Array, Hash Table, Sliding Window"
+            placeholder={t("leetcode.topicsPlaceholder")}
             onChange={(event) => onChange("topics", event.target.value)}
           />
         </label>
         <label className="full-width">
-          <span>Approach</span>
+          <span>{t("leetcode.approach")}</span>
           <textarea
             rows={3}
             value={form.approach}
@@ -647,9 +858,9 @@ function ProblemEditor({
         </label>
       </div>
       <div className="actions-row">
-        <button type="submit">{form.id ? "Update Problem" : "Add Problem"}</button>
+        <button type="submit">{form.id ? t("leetcode.updateProblem") : t("leetcode.addProblem")}</button>
         <button type="button" className="button-secondary" onClick={onCancel}>
-          Cancel
+          {t("common.cancel")}
         </button>
       </div>
     </form>
@@ -657,6 +868,7 @@ function ProblemEditor({
 }
 
 function LeetCodePage() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const settings = useAppStore((state) => state.settings);
   const syncMetadata = useAppStore((state) => state.leetCodeSyncMetadata);
@@ -686,6 +898,15 @@ function LeetCodePage() {
   const [allowedConflictNumbers, setAllowedConflictNumbers] = useState<number[]>([]);
   const [conflictFieldSelection, setConflictFieldSelection] =
     useState<ConflictFieldSelection>({});
+  const [aiProblemId, setAiProblemId] = useState<string>("");
+  const [aiOutput, setAiOutput] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [isMobileLeetCode, setIsMobileLeetCode] = useState<boolean>(() =>
+    typeof window === "undefined" ? false : window.innerWidth <= 880
+  );
+  const [VirtualListComponent, setVirtualListComponent] = useState<
+    ((props: Record<string, unknown>) => ReactNode) | null
+  >(null);
 
   const filtered = useMemo(() => {
     return problems.filter((problem) => {
@@ -877,6 +1098,106 @@ function LeetCodePage() {
     });
   }, [csvImportText, csvConflicts]);
 
+  useEffect(() => {
+    if (!aiProblemId && sortedFiltered.length > 0) {
+      setAiProblemId(sortedFiltered[0].id);
+    }
+    if (aiProblemId && !sortedFiltered.some((problem) => problem.id === aiProblemId)) {
+      setAiProblemId(sortedFiltered[0]?.id ?? "");
+    }
+  }, [aiProblemId, sortedFiltered]);
+
+  useEffect(() => {
+    function onResize() {
+      setIsMobileLeetCode(window.innerWidth <= 880);
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void import("react-window").then((module) => {
+      if (!active) return;
+      setVirtualListComponent(() => module.List as unknown as (props: Record<string, unknown>) => ReactNode);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const syncHealthState = useMemo<"healthy" | "warning" | "critical">(() => {
+    if (!settings.leetCodeUsername.trim()) return "critical";
+    if (syncMetadata.status === "error" || syncMetadata.consecutiveFailures >= 3) return "critical";
+    if (!syncMetadata.lastSyncAt) return "warning";
+    const since = Date.now() - new Date(syncMetadata.lastSyncAt).getTime();
+    if (since > 36 * 60 * 60 * 1000) return "critical";
+    if (since > 24 * 60 * 60 * 1000) return "warning";
+    return "healthy";
+  }, [settings.leetCodeUsername, syncMetadata.status, syncMetadata.consecutiveFailures, syncMetadata.lastSyncAt]);
+
+  const nextAutoSyncAt = useMemo(() => {
+    if (!syncMetadata.lastSyncAt) return null;
+    return new Date(new Date(syncMetadata.lastSyncAt).getTime() + 24 * 60 * 60 * 1000);
+  }, [syncMetadata.lastSyncAt]);
+
+  async function runLeetCodeAi(mode: "hints" | "explain" | "pattern") {
+    if (!settings.aiEnabled) {
+      setAiOutput(t("ai.messages.enableFirst"));
+      return;
+    }
+    if (!settings.aiFeatureLeetCodeHints) {
+      setAiOutput(t("ai.messages.leetcodeHintsDisabled"));
+      return;
+    }
+    if (!settings.aiPrivacyAcknowledged) {
+      setAiOutput(t("ai.messages.acknowledgePrivacy"));
+      return;
+    }
+    if (settings.aiProvider === "byok" && !settings.aiApiKey.trim()) {
+      setAiOutput(t("ai.messages.byokMissing"));
+      return;
+    }
+    const quota = consumeAiQuota(settings.aiProvider);
+    if (!quota.ok) {
+      setAiOutput(t("ai.messages.freeTierReached"));
+      return;
+    }
+    const target = problems.find((problem) => problem.id === aiProblemId);
+    if (!target) {
+      setAiOutput(t("leetcode.selectProblemFirst"));
+      return;
+    }
+    const promptMap = {
+      hints: `Give progressive hints (level 1 to 3) for problem #${target.problemNumber} ${target.title}. Avoid full solution until last hint.`,
+      explain: `Explain an ideal solution for #${target.problemNumber} ${target.title} with intuition, complexity, and edge cases.`,
+      pattern: `Identify likely patterns for #${target.problemNumber} ${target.title}. Mention what signals in prompt indicate each pattern.`,
+    } as const;
+    const safePrompt = sanitizeAiPrompt(promptMap[mode]);
+    if (!safePrompt) {
+      setAiOutput(t("ai.messages.invalidPrompt"));
+      return;
+    }
+    setAiLoading(true);
+    setAiOutput("");
+    try {
+      for await (const chunk of streamAiResponseLazy({
+        prompt: safePrompt,
+        moduleName: "LeetCode",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        apiKey: settings.aiApiKey,
+        context: {
+          problemsCount: problems.length,
+        },
+      })) {
+        setAiOutput((prev) => prev + chunk);
+      }
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   function onHeaderSort(
     key:
       | "updatedAt"
@@ -896,59 +1217,67 @@ function LeetCodePage() {
 
   return (
     <PageCard
-      title="LeetCode Tracker"
-      subtitle="Track solved problems, confidence, and review queue. Manual entry first, auto-sync optional."
+      title={t("pages.leetcode.title")}
+      subtitle={t("pages.leetcode.subtitle")}
     >
       <div className="grid">
         <article className="tile">
-          <h2>Quick Add</h2>
-          <p>Use the button below to create problem entries.</p>
+          <h2>{t("leetcode.quickAddTitle")}</h2>
+          <p>{t("leetcode.quickAddDesc")}</p>
         </article>
         <article className="tile">
-          <h2>Sync Status</h2>
+          <h2>{t("leetcode.syncStatusTitle")}</h2>
           <p>
             {settings.leetCodeUsername
-              ? `Connected as ${settings.leetCodeUsername}`
-              : "Disconnected. Add your username in Settings."}
+              ? t("leetcode.connectedAs", { username: settings.leetCodeUsername })
+              : t("leetcode.disconnected")}
           </p>
-          <p>
-            Method: {syncMetadata.method} | Status: {syncMetadata.status}
-          </p>
+          <p>{t("leetcode.syncMethodStatus", { method: syncMetadata.method, status: syncMetadata.status })}</p>
           {typeof syncMetadata.lastImportedCount === "number" && (
-            <p>Imported this run: {syncMetadata.lastImportedCount}</p>
+            <p>{t("leetcode.importedThisRun", { count: syncMetadata.lastImportedCount })}</p>
           )}
           {typeof syncMetadata.lastCreatedCount === "number" && (
-            <p>Created: {syncMetadata.lastCreatedCount}</p>
+            <p>{t("leetcode.createdCount", { count: syncMetadata.lastCreatedCount })}</p>
           )}
           {typeof syncMetadata.lastMergedCount === "number" && (
-            <p>Merged: {syncMetadata.lastMergedCount}</p>
+            <p>{t("leetcode.mergedCount", { count: syncMetadata.lastMergedCount })}</p>
           )}
           {typeof syncMetadata.scrapeSolvedCount === "number" && (
-            <p>Scrape solved count: {syncMetadata.scrapeSolvedCount}</p>
+            <p>{t("leetcode.scrapeSolvedCount", { count: syncMetadata.scrapeSolvedCount })}</p>
           )}
-          {syncMetadata.activeStep && <p>Active step: {syncMetadata.activeStep}</p>}
+          {syncMetadata.activeStep && <p>{t("leetcode.activeStep", { step: syncMetadata.activeStep })}</p>}
           {syncMetadata.lastAttemptMethods.length > 0 && (
-            <p>Attempt chain: {syncMetadata.lastAttemptMethods.join(" -> ")}</p>
+            <p>{t("leetcode.attemptChain", { chain: syncMetadata.lastAttemptMethods.join(" -> ") })}</p>
           )}
           <p>
-            Last sync:{" "}
+            {t("leetcode.lastSync")}{" "}
             {syncMetadata.lastSyncAt
               ? new Date(syncMetadata.lastSyncAt).toLocaleString()
-              : "Never"}
+              : t("leetcode.never")}
           </p>
-          <p>Failures: {syncMetadata.consecutiveFailures}</p>
-          {syncMetadata.lastError && <p>Error: {syncMetadata.lastError}</p>}
+          <p>{t("leetcode.failures", { count: syncMetadata.consecutiveFailures })}</p>
+          {syncMetadata.lastError && <p>{t("leetcode.error", { message: syncMetadata.lastError })}</p>}
+          <p>
+            {t("leetcode.syncHealth")}:{" "}
+            <span className={`sync-health sync-health-${syncHealthState}`}>
+              {t(`leetcode.health.${syncHealthState}`)}
+            </span>
+          </p>
+          <p>
+            {t("leetcode.nextAutoSync")}{" "}
+            {nextAutoSyncAt ? nextAutoSyncAt.toLocaleString() : t("leetcode.afterFirstSync")}
+          </p>
           <div className="actions-row">
             <button
               type="button"
               disabled={syncMetadata.status === "syncing"}
               onClick={() => void runLeetCodeSync()}
             >
-              Sync Now
+              {t("leetcode.syncNow")}
             </button>
           </div>
           <div className="csv-import-box">
-            <small>Manual CSV fallback (problemNumber,title,difficulty,topics|pipe,optionalDate)</small>
+            <small>{t("leetcode.csvFallbackHint")}</small>
             <textarea
               rows={3}
               value={csvImportText}
@@ -961,7 +1290,7 @@ function LeetCodePage() {
                 className="button-secondary"
                 onClick={() => setShowCsvPreview((prev) => !prev)}
               >
-                {showCsvPreview ? "Hide Preview" : "Preview CSV"}
+                {showCsvPreview ? t("leetcode.hidePreview") : t("leetcode.previewCsv")}
               </button>
               <button
                 type="button"
@@ -999,11 +1328,17 @@ function LeetCodePage() {
                       .map((row) => `L${row.line}: ${row.reason}`),
                   });
                   setCsvImportMessage(
-                    `Imported ${result.importedCount} row(s): ${result.createdCount} created, ${result.mergedCount} merged, ${result.invalidCount} invalid, ${result.skippedConflicts} skipped conflicts.`
+                    t("leetcode.csvImportSummary", {
+                      imported: result.importedCount,
+                      created: result.createdCount,
+                      merged: result.mergedCount,
+                      invalid: result.invalidCount,
+                      skipped: result.skippedConflicts,
+                    })
                   );
                 }}
               >
-                Import CSV Text
+                {t("leetcode.importCsvText")}
               </button>
               <button
                 type="button"
@@ -1019,7 +1354,7 @@ function LeetCodePage() {
                   URL.revokeObjectURL(url);
                 }}
               >
-                Download Template
+                {t("leetcode.downloadTemplate")}
               </button>
               {csvConflicts.length > 0 && (
                 <button
@@ -1048,7 +1383,7 @@ function LeetCodePage() {
                     URL.revokeObjectURL(url);
                   }}
                 >
-                  Download Conflict Report
+                  {t("leetcode.downloadConflictReport")}
                 </button>
               )}
               {csvConflicts.length > 0 && (
@@ -1093,7 +1428,7 @@ function LeetCodePage() {
                     URL.revokeObjectURL(url);
                   }}
                 >
-                  Download Conflict CSV
+                  {t("leetcode.downloadConflictCsv")}
                 </button>
               )}
             </div>
@@ -1101,8 +1436,12 @@ function LeetCodePage() {
             {showCsvPreview && (
               <div className="csv-preview">
                 <small>
-                  Preview: {csvPreview.validRows.length} valid, {csvPreview.invalidRows.length} invalid,{" "}
-                  {csvPreview.createdCount} new, {csvPreview.mergedCount} merge.
+                  {t("leetcode.previewSummary", {
+                    valid: csvPreview.validRows.length,
+                    invalid: csvPreview.invalidRows.length,
+                    created: csvPreview.createdCount,
+                    merged: csvPreview.mergedCount,
+                  })}
                 </small>
                 {csvPreview.invalidRows.slice(0, 5).map((row) => (
                   <small key={`${row.line}-${row.reason}`}>{`L${row.line}: ${row.reason}`}</small>
@@ -1110,7 +1449,7 @@ function LeetCodePage() {
                 {csvConflicts.length > 0 && (
                   <div className="conflict-review-panel">
                     <div className="conflict-review-header">
-                      <strong>Conflict Review ({csvConflicts.length})</strong>
+                      <strong>{t("leetcode.conflictReview", { count: csvConflicts.length })}</strong>
                       <div className="inline-actions">
                         <button
                           type="button"
@@ -1121,14 +1460,14 @@ function LeetCodePage() {
                             )
                           }
                         >
-                          Apply All
+                          {t("leetcode.applyAll")}
                         </button>
                         <button
                           type="button"
                           className="button-secondary"
                           onClick={() => setAllowedConflictNumbers([])}
                         >
-                          Reject All
+                          {t("leetcode.rejectAll")}
                         </button>
                         <button
                           type="button"
@@ -1149,16 +1488,19 @@ function LeetCodePage() {
                             )
                           }
                         >
-                          Reset Field Selections
+                          {t("leetcode.resetFieldSelections")}
                         </button>
                       </div>
                     </div>
                     <div className="conflict-summary-chips">
-                      <span className="summary-chip">Selected: {selectedConflictCount}</span>
-                      <span className="summary-chip">Rejected: {rejectedConflictCount}</span>
+                      <span className="summary-chip">{t("leetcode.selectedCount", { count: selectedConflictCount })}</span>
+                      <span className="summary-chip">{t("leetcode.rejectedCount", { count: rejectedConflictCount })}</span>
                     </div>
                     <small>
-                      Selected merges: {allowedConflictNumbers.length}/{csvConflicts.length}
+                      {t("leetcode.selectedMerges", {
+                        selected: allowedConflictNumbers.length,
+                        total: csvConflicts.length,
+                      })}
                     </small>
                     {csvConflicts.map((entry) => {
                       const checked = allowedConflictNumbers.includes(entry.row.problemNumber);
@@ -1187,10 +1529,10 @@ function LeetCodePage() {
                             </span>
                           </label>
                           <div className="conflict-diff-table">
-                            <div className="conflict-diff-head">Field</div>
-                            <div className="conflict-diff-head">Use Incoming</div>
-                            <div className="conflict-diff-head">Current</div>
-                            <div className="conflict-diff-head">Incoming</div>
+                            <div className="conflict-diff-head">{t("leetcode.field")}</div>
+                            <div className="conflict-diff-head">{t("leetcode.useIncoming")}</div>
+                            <div className="conflict-diff-head">{t("leetcode.current")}</div>
+                            <div className="conflict-diff-head">{t("leetcode.incoming")}</div>
                             {entry.changes.map((change) => (
                               <div
                                 key={`${entry.row.problemNumber}-${change.field}`}
@@ -1227,35 +1569,81 @@ function LeetCodePage() {
           </div>
         </article>
         <article className="tile">
-          <h2>Total Logged</h2>
-          <p>{problems.length} problems</p>
+          <h2>{t("leetcode.totalLoggedTitle")}</h2>
+          <p>{t("leetcode.totalLoggedCount", { count: problems.length })}</p>
         </article>
       </div>
 
       <article className="tile topic-radar-section">
-        <h2>Topic Proficiency Radar</h2>
-        <p>Top topics based on solved volume and confidence.</p>
+        <h2>{t("leetcode.topicRadarTitle")}</h2>
+        <p>{t("leetcode.topicRadarDesc")}</p>
         <div className="topic-radar-layout">
           <TopicRadar data={topicRadarData} />
           <div className="topic-radar-list">
             {topicRadarData.map((item) => (
               <div key={item.topic} className="topic-radar-row">
                 <strong>{item.topic}</strong>
-                <span>{item.solvedCount} solved</span>
-                <span>score {item.score}</span>
+                <span>{t("leetcode.solvedCount", { count: item.solvedCount })}</span>
+                <span>{t("leetcode.score", { score: item.score })}</span>
                 <button
                   type="button"
                   className="button-secondary"
                   onClick={() => navigate(`/leetcode/topic/${encodeURIComponent(item.topic)}`)}
                 >
-                  Deep Dive
+                  {t("leetcode.deepDive")}
                 </button>
               </div>
             ))}
             {topicRadarData.length === 0 && (
-              <p>No solved topic data yet. Solve some tagged problems first.</p>
+              <p>{t("leetcode.noSolvedTopicData")}</p>
             )}
           </div>
+        </div>
+      </article>
+
+      <article className="tile leetcode-ai-panel">
+        <h2>{t("leetcode.aiTitle")}</h2>
+        <p>{t("leetcode.aiDesc")}</p>
+        <div className="filters-row">
+          <select value={aiProblemId} onChange={(event) => setAiProblemId(event.target.value)}>
+            <option value="">{t("leetcode.selectProblem")}</option>
+            {sortedFiltered.slice(0, 250).map((problem) => (
+              <option key={problem.id} value={problem.id}>
+                #{problem.problemNumber} {problem.title}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="button-secondary"
+            disabled={aiLoading}
+            onClick={() => void runLeetCodeAi("hints")}
+          >
+            {t("leetcode.progressiveHints")}
+          </button>
+          <button
+            type="button"
+            className="button-secondary"
+            disabled={aiLoading}
+            onClick={() => void runLeetCodeAi("explain")}
+          >
+            {t("leetcode.explainSolution")}
+          </button>
+        </div>
+        <div className="actions-row">
+          <button
+            type="button"
+            className="button-secondary"
+            disabled={aiLoading}
+            onClick={() => void runLeetCodeAi("pattern")}
+          >
+            {t("leetcode.patternRecognition")}
+          </button>
+        </div>
+        <div className="ai-inline-output">
+          {aiLoading && <small>{t("leetcode.generatingResponse")}</small>}
+          {!aiLoading && !aiOutput && <small>{t("ai.messages.runActionPrompt")}</small>}
+          {aiOutput && <pre>{aiOutput}</pre>}
         </div>
       </article>
 
@@ -1267,7 +1655,7 @@ function LeetCodePage() {
             setShowForm((prev) => !prev);
           }}
         >
-          {showForm ? "Hide Form" : "Add Problem"}
+          {showForm ? t("leetcode.hideForm") : t("leetcode.addProblem")}
         </button>
       </div>
 
@@ -1285,7 +1673,7 @@ function LeetCodePage() {
         <input
           type="search"
           value={searchQuery}
-          placeholder="Search by #, title, or topic"
+          placeholder={t("leetcode.searchPlaceholder")}
           onChange={(event) => setSearchQuery(event.target.value)}
         />
         <select
@@ -1296,10 +1684,10 @@ function LeetCodePage() {
             )
           }
         >
-          <option value="all">All Difficulties</option>
-          <option value="Easy">Easy</option>
-          <option value="Medium">Medium</option>
-          <option value="Hard">Hard</option>
+          <option value="all">{t("leetcode.allDifficulties")}</option>
+          <option value="Easy">{t("leetcode.easy")}</option>
+          <option value="Medium">{t("leetcode.medium")}</option>
+          <option value="Hard">{t("leetcode.hard")}</option>
         </select>
         <select
           value={statusFilter}
@@ -1314,16 +1702,16 @@ function LeetCodePage() {
             )
           }
         >
-          <option value="all">All Statuses</option>
-          <option value="Solved">Solved</option>
-          <option value="Attempted">Attempted</option>
-          <option value="Review">Review</option>
-          <option value="Stuck">Stuck</option>
+          <option value="all">{t("leetcode.allStatuses")}</option>
+          <option value="Solved">{t("leetcode.solved")}</option>
+          <option value="Attempted">{t("leetcode.attempted")}</option>
+          <option value="Review">{t("leetcode.review")}</option>
+          <option value="Stuck">{t("leetcode.stuck")}</option>
         </select>
       </div>
       {uniqueTopics.length > 0 && (
         <div className="topic-filter-row">
-          <span className="row-title">Topics:</span>
+          <span className="row-title">{t("leetcode.topicsLabel")}</span>
           <div className="chip-list">
             {uniqueTopics.map(([topic, count]) => (
               <button
@@ -1341,7 +1729,7 @@ function LeetCodePage() {
       {topicFilter && (
         <div className="active-topic-row">
           <span>
-            Active topic filter: <strong>{topicFilter}</strong>
+            {t("leetcode.activeTopicFilter")} <strong>{topicFilter}</strong>
           </span>
           <div className="inline-actions">
             <button
@@ -1349,17 +1737,17 @@ function LeetCodePage() {
               className="button-secondary"
               onClick={() => navigate(`/leetcode/topic/${encodeURIComponent(topicFilter)}`)}
             >
-              Open Topic Page
+              {t("leetcode.openTopicPage")}
             </button>
             <button type="button" className="button-secondary" onClick={() => setTopicFilter("")}>
-              Clear Topic Filter
+              {t("leetcode.clearTopicFilter")}
             </button>
           </div>
         </div>
       )}
 
       <div className="table-wrap">
-        <div className="problem-grid-header problem-grid">
+        {!isMobileLeetCode && <div className="problem-grid-header problem-grid">
           <div className="problem-cell">
                 <button
                   type="button"
@@ -1375,7 +1763,7 @@ function LeetCodePage() {
                   className="sort-header"
                   onClick={() => onHeaderSort("title")}
                 >
-                  Title {sortBy === "title" ? (sortOrder === "asc" ? "↑" : "↓") : ""}
+                  {t("leetcode.title")} {sortBy === "title" ? (sortOrder === "asc" ? "↑" : "↓") : ""}
                 </button>
           </div>
           <div className="problem-cell">
@@ -1384,7 +1772,7 @@ function LeetCodePage() {
                   className="sort-header"
                   onClick={() => onHeaderSort("difficulty")}
                 >
-                  Difficulty{" "}
+                  {t("leetcode.difficulty")}{" "}
                   {sortBy === "difficulty" ? (sortOrder === "asc" ? "↑" : "↓") : ""}
                 </button>
           </div>
@@ -1394,17 +1782,18 @@ function LeetCodePage() {
                   className="sort-header"
                   onClick={() => onHeaderSort("status")}
                 >
-                  Status {sortBy === "status" ? (sortOrder === "asc" ? "↑" : "↓") : ""}
+                  {t("leetcode.status")} {sortBy === "status" ? (sortOrder === "asc" ? "↑" : "↓") : ""}
                 </button>
           </div>
-          <div className="problem-cell">Topics</div>
+          <div className="problem-cell">{t("leetcode.verifiedStatus")}</div>
+          <div className="problem-cell">{t("leetcode.topics")}</div>
           <div className="problem-cell">
                 <button
                   type="button"
                   className="sort-header"
                   onClick={() => onHeaderSort("confidence")}
                 >
-                  Confidence{" "}
+                  {t("leetcode.confidence")}{" "}
                   {sortBy === "confidence" ? (sortOrder === "asc" ? "↑" : "↓") : ""}
                 </button>
           </div>
@@ -1414,19 +1803,19 @@ function LeetCodePage() {
                   className="sort-header"
                   onClick={() => onHeaderSort("updatedAt")}
                 >
-                  Updated{" "}
+                  {t("leetcode.updated")}{" "}
                   {sortBy === "updatedAt" ? (sortOrder === "asc" ? "↑" : "↓") : ""}
                 </button>
           </div>
-          <div className="problem-cell">Actions</div>
-        </div>
+          <div className="problem-cell">{t("leetcode.actions")}</div>
+        </div>}
         {sortedFiltered.length === 0 && (
           <div className="empty-cell standalone-empty">
-            No problems found for current filters.
+            {t("leetcode.noProblemsForFilters")}
           </div>
         )}
-        {sortedFiltered.length > 0 && (
-          <List
+        {sortedFiltered.length > 0 && !isMobileLeetCode && VirtualListComponent && (
+          <VirtualListComponent
             className="virtual-list"
             style={{ height: listHeight, width: "100%" }}
             rowCount={sortedFiltered.length}
@@ -1436,18 +1825,147 @@ function LeetCodePage() {
             overscanCount={8}
           />
         )}
+        {sortedFiltered.length > 0 && !isMobileLeetCode && !VirtualListComponent && (
+          <div className="virtual-list-fallback">
+            {sortedFiltered.slice(0, 60).map((problem) => (
+              <div key={problem.id} className="problem-row problem-grid">
+                <div className="problem-cell">{problem.problemNumber}</div>
+                <div className="problem-cell">{problem.title}</div>
+                <div className="problem-cell">
+                  <span className={`badge badge-difficulty-${toDifficultyClass(problem.difficulty)}`}>
+                    {problem.difficulty}
+                  </span>
+                </div>
+                <div className="problem-cell">
+                  <span className={`badge badge-status-${toStatusClass(problem.status)}`}>
+                    {problem.status}
+                  </span>
+                </div>
+                <div className="problem-cell">
+                  <span className={`badge ${problem.verified ? "badge-verified" : "badge-unverified"}`}>
+                    {problem.verified ? t("leetcode.verified") : t("leetcode.unverified")}
+                  </span>
+                </div>
+                <div className="problem-cell">
+                  <div className="chip-list chip-list-inline">
+                    {problem.topics.length === 0 && <span>-</span>}
+                    {problem.topics.slice(0, 3).map((topic) => (
+                      <button
+                        key={`${problem.id}-fallback-${topic}`}
+                        type="button"
+                        className={`topic-chip${topicFilter === topic ? " topic-chip-active" : ""}`}
+                        onClick={() => setTopicFilter(topic)}
+                      >
+                        {topic}
+                      </button>
+                    ))}
+                    {problem.topics.length > 3 && (
+                      <span className="more-topics">+{problem.topics.length - 3}</span>
+                    )}
+                  </div>
+                </div>
+                <div className="problem-cell">{problem.confidence}</div>
+                <div className="problem-cell">{new Date(problem.updatedAt).toLocaleDateString()}</div>
+                <div className="problem-cell">
+                  <div className="inline-actions">
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      onClick={() => {
+                        setEditing(problem);
+                        setShowForm(true);
+                      }}
+                    >
+                      {t("common.edit")}
+                    </button>
+                    <button
+                      type="button"
+                      className="button-danger"
+                      onClick={() => deleteProblem(problem.id)}
+                    >
+                      {t("common.delete")}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {sortedFiltered.length > 0 && isMobileLeetCode && (
+          <div className="leetcode-mobile-cards">
+            {sortedFiltered.map((problem) => (
+              <article key={problem.id} className="leetcode-mobile-card">
+                <div className="leetcode-mobile-card-head">
+                  <strong>
+                    #{problem.problemNumber} {problem.title}
+                  </strong>
+                  <span className={`badge ${problem.verified ? "badge-verified" : "badge-unverified"}`}>
+                    {problem.verified ? t("leetcode.verified") : t("leetcode.unverified")}
+                  </span>
+                </div>
+                <div className="chip-list">
+                  <span className={`badge badge-difficulty-${toDifficultyClass(problem.difficulty)}`}>
+                    {problem.difficulty}
+                  </span>
+                  <span className={`badge badge-status-${toStatusClass(problem.status)}`}>
+                    {problem.status}
+                  </span>
+                  <span className="badge badge-confidence">
+                    {t("leetcode.confidence")}: {problem.confidence}
+                  </span>
+                </div>
+                <small>{new Date(problem.updatedAt).toLocaleDateString()}</small>
+                <div className="chip-list chip-list-inline">
+                  {problem.topics.length === 0 && <span>-</span>}
+                  {problem.topics.map((topic) => (
+                    <button
+                      key={`${problem.id}-mobile-${topic}`}
+                      type="button"
+                      className={`topic-chip${topicFilter === topic ? " topic-chip-active" : ""}`}
+                      onClick={() => setTopicFilter(topicFilter === topic ? "" : topic)}
+                    >
+                      {topic}
+                    </button>
+                  ))}
+                </div>
+                <div className="inline-actions">
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={() => {
+                      setEditing(problem);
+                      setShowForm(true);
+                    }}
+                  >
+                    {t("common.edit")}
+                  </button>
+                  <button
+                    type="button"
+                    className="button-danger"
+                    onClick={() => deleteProblem(problem.id)}
+                  >
+                    {t("common.delete")}
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </div>
       <div className="pagination-row">
         <span>
-          Showing {sortedFiltered.length === 0 ? 0 : 1}-{sortedFiltered.length} of{" "}
-          {sortedFiltered.length}
+          {t("leetcode.showingRange", {
+            start: sortedFiltered.length === 0 ? 0 : 1,
+            end: sortedFiltered.length,
+            total: sortedFiltered.length,
+          })}
         </span>
-        <span>Virtualized rendering enabled (react-window)</span>
+        <span>{t("leetcode.virtualizedRenderingEnabled")}</span>
       </div>
       <article className="tile import-history-panel">
-        <h2>Import & Sync History</h2>
+        <h2>{t("leetcode.importSyncHistory")}</h2>
         {syncHistory.length === 0 ? (
-          <p>No import history yet.</p>
+          <p>{t("leetcode.noImportHistory")}</p>
         ) : (
           <ul>
             {syncHistory.slice(0, 8).map((entry, index) => (
@@ -1457,9 +1975,15 @@ function LeetCodePage() {
                 </strong>
                 <span>{new Date(entry.at).toLocaleString()}</span>
                 <span>
-                  imported {entry.importedCount ?? 0}, created {entry.createdCount ?? 0}, merged{" "}
-                  {entry.mergedCount ?? 0}
-                  {typeof entry.invalidCount === "number" ? `, invalid ${entry.invalidCount}` : ""}
+                  {t("leetcode.historyCounts", {
+                    imported: entry.importedCount ?? 0,
+                    created: entry.createdCount ?? 0,
+                    merged: entry.mergedCount ?? 0,
+                    invalid:
+                      typeof entry.invalidCount === "number"
+                        ? `, ${t("leetcode.invalidCountLabel", { count: entry.invalidCount })}`
+                        : "",
+                  })}
                 </span>
                 {entry.message && <small>{entry.message}</small>}
               </li>
@@ -1472,6 +1996,7 @@ function LeetCodePage() {
 }
 
 function TopicDeepDivePage() {
+  const { t } = useTranslation();
   const params = useParams();
   const navigate = useNavigate();
   const topicName = decodeURIComponent(params.topicName ?? "");
@@ -1519,51 +2044,63 @@ function TopicDeepDivePage() {
 
   return (
     <PageCard
-      title={`Topic Deep Dive: ${topicName}`}
-      subtitle="Topic-specific progress, problem patterns, notes, and resources."
+      title={t("leetcode.topicDeepDiveTitle", { topic: topicName })}
+      subtitle={t("leetcode.topicDeepDiveSubtitle")}
     >
       <div className="inline-actions">
         <button type="button" className="button-secondary" onClick={() => navigate("/leetcode")}>
-          Back to LeetCode
+          {t("leetcode.backToLeetCode")}
         </button>
       </div>
       <div className="grid">
         <article className="tile">
-          <h2>Completion</h2>
+          <h2>{t("leetcode.completion")}</h2>
           <p>
-            {solvedCount}/{topicProblems.length} solved ({completion}%)
+            {t("leetcode.completionSummary", {
+              solved: solvedCount,
+              total: topicProblems.length,
+              completion,
+            })}
           </p>
         </article>
         <article className="tile">
-          <h2>Difficulty Mix</h2>
+          <h2>{t("leetcode.difficultyMix")}</h2>
           <p>
-            Easy {byDifficulty.easy} | Medium {byDifficulty.medium} | Hard {byDifficulty.hard}
+            {t("leetcode.difficultyMixSummary", {
+              easy: byDifficulty.easy,
+              medium: byDifficulty.medium,
+              hard: byDifficulty.hard,
+            })}
           </p>
         </article>
         <article className="tile">
-          <h2>Status Breakdown</h2>
+          <h2>{t("leetcode.statusBreakdown")}</h2>
           <p>
-            Solved {byStatus.solved} | Attempted {byStatus.attempted} | Review {byStatus.review} |
-            Stuck {byStatus.stuck}
+            {t("leetcode.statusBreakdownSummary", {
+              solved: byStatus.solved,
+              attempted: byStatus.attempted,
+              review: byStatus.review,
+              stuck: byStatus.stuck,
+            })}
           </p>
         </article>
       </div>
 
       <article className="tile topic-notes-panel">
-        <h2>Personal Notes</h2>
+        <h2>{t("leetcode.personalNotes")}</h2>
         <textarea
           rows={5}
-          placeholder={`Write your ${topicName} pattern notes...`}
+          placeholder={t("leetcode.patternNotesPlaceholder", { topic: topicName })}
           value={topicNotes[topicName] ?? ""}
           onChange={(event) => setTopicNote(topicName, event.target.value)}
         />
       </article>
 
       <article className="tile topic-notes-panel">
-        <h2>Curated Resource Links</h2>
+        <h2>{t("leetcode.curatedResourceLinks")}</h2>
         <textarea
           rows={4}
-          placeholder={"One URL per line"}
+          placeholder={t("leetcode.oneUrlPerLine")}
           value={resourcesDraft}
           onChange={(event) => setResourcesDraft(event.target.value)}
         />
@@ -1581,7 +2118,7 @@ function TopicDeepDivePage() {
               )
             }
           >
-            Save Resources
+            {t("leetcode.saveResources")}
           </button>
         </div>
       </article>
@@ -1589,16 +2126,17 @@ function TopicDeepDivePage() {
       <div className="table-wrap">
         <div className="problem-grid-header problem-grid">
           <div className="problem-cell">#</div>
-          <div className="problem-cell">Title</div>
-          <div className="problem-cell">Difficulty</div>
-          <div className="problem-cell">Status</div>
-          <div className="problem-cell">Topics</div>
-          <div className="problem-cell">Confidence</div>
-          <div className="problem-cell">Updated</div>
-          <div className="problem-cell">Source</div>
+          <div className="problem-cell">{t("leetcode.title")}</div>
+          <div className="problem-cell">{t("leetcode.difficulty")}</div>
+          <div className="problem-cell">{t("leetcode.status")}</div>
+          <div className="problem-cell">{t("leetcode.verifiedStatus")}</div>
+          <div className="problem-cell">{t("leetcode.topics")}</div>
+          <div className="problem-cell">{t("leetcode.confidence")}</div>
+          <div className="problem-cell">{t("leetcode.updated")}</div>
+          <div className="problem-cell">{t("leetcode.source")}</div>
         </div>
         {topicProblems.length === 0 && (
-          <div className="empty-cell standalone-empty">No problems logged for this topic yet.</div>
+          <div className="empty-cell standalone-empty">{t("leetcode.noTopicProblemsYet")}</div>
         )}
         {topicProblems.map((problem) => (
           <div key={problem.id} className="problem-row problem-grid">
@@ -1612,6 +2150,11 @@ function TopicDeepDivePage() {
             <div className="problem-cell">
               <span className={`badge badge-status-${toStatusClass(problem.status)}`}>
                 {problem.status}
+              </span>
+            </div>
+            <div className="problem-cell">
+              <span className={`badge ${problem.verified ? "badge-verified" : "badge-unverified"}`}>
+                {problem.verified ? t("leetcode.verified") : t("leetcode.unverified")}
               </span>
             </div>
             <div className="problem-cell">
@@ -1634,6 +2177,16 @@ function TopicDeepDivePage() {
 }
 
 function ReadingPage() {
+  const { t } = useTranslation();
+  type GeneratedFlashcardDraft = {
+    id: string;
+    sourcePointId: string;
+    question: string;
+    answer: string;
+    selected: boolean;
+  };
+
+  const settings = useAppStore((state) => state.settings);
   const books = useAppStore((state) => state.books);
   const knowledgePoints = useAppStore((state) => state.knowledgePoints);
   const upsertBook = useAppStore((state) => state.upsertBook);
@@ -1642,6 +2195,9 @@ function ReadingPage() {
   const deleteKnowledgePoint = useAppStore((state) => state.deleteKnowledgePoint);
   const markKnowledgePointReviewResult = useAppStore(
     (state) => state.markKnowledgePointReviewResult
+  );
+  const enqueueKnowledgePointsForReview = useAppStore(
+    (state) => state.enqueueKnowledgePointsForReview
   );
 
   const [activeBookId, setActiveBookId] = useState<string>("");
@@ -1669,6 +2225,56 @@ function ReadingPage() {
   const [pointTags, setPointTags] = useState("");
   const [pointImportance, setPointImportance] = useState<Importance>("Core");
   const [pointConfidence, setPointConfidence] = useState<"1" | "2" | "3" | "4" | "5">("3");
+  const [chapterFilter, setChapterFilter] = useState<string>("all");
+  const [crossBookTagFilter, setCrossBookTagFilter] = useState<string>("all");
+  const [crossBookChapterFilter, setCrossBookChapterFilter] = useState<string>("all");
+  const [crossBookBookFilter, setCrossBookBookFilter] = useState<string>("all");
+  const [crossBookQuery, setCrossBookQuery] = useState("");
+  const [aiPointId, setAiPointId] = useState<string>("");
+  const [aiReadingOutput, setAiReadingOutput] = useState("");
+  const [aiReadingLoading, setAiReadingLoading] = useState(false);
+  const [aiFlashcardScope, setAiFlashcardScope] = useState<"selected" | "chapter" | "book">(
+    "selected"
+  );
+  const [aiFlashcardsLoading, setAiFlashcardsLoading] = useState(false);
+  const [aiFlashcardsOutput, setAiFlashcardsOutput] = useState("");
+  const pointNodeRefs = useRef<Record<string, HTMLLIElement | null>>({});
+
+  function getBookStatusLabel(status: BookStatus): string {
+    if (status === "reading") return t("reading.statusReading");
+    if (status === "planned") return t("reading.statusPlanned");
+    return t("reading.statusCompleted");
+  }
+
+  function getImportanceLabel(importance: Importance): string {
+    if (importance === "Core") return t("reading.importanceCore");
+    if (importance === "Supporting") return t("reading.importanceSupporting");
+    return t("reading.importanceNiceToKnow");
+  }
+
+  function stripHtml(html: string): string {
+    if (typeof window === "undefined") return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return (doc.body.textContent ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  function hasMeaningfulRichText(html: string): boolean {
+    return stripHtml(html).length > 0;
+  }
+
+  const pointConceptEditor = useEditor({
+    extensions: [
+      StarterKit,
+      Placeholder.configure({
+        placeholder: t("reading.conceptPlaceholder"),
+      }),
+    ],
+    content: pointConcept || "<p></p>",
+    onUpdate: ({ editor }) => {
+      setPointConcept(editor.getHTML());
+    },
+  });
+  const [flashcardDrafts, setFlashcardDrafts] = useState<GeneratedFlashcardDraft[]>([]);
 
   useEffect(() => {
     if (!activeBookId && books.length > 0) {
@@ -1685,6 +2291,7 @@ function ReadingPage() {
     setReviewRevealed(false);
     setReviewedCount(0);
     setReviewNeedsWorkCount(0);
+    setChapterFilter("all");
   }, [activeBookId]);
 
   const activeBook = books.find((book) => book.id === activeBookId);
@@ -1704,6 +2311,9 @@ function ReadingPage() {
     const query = pointSearch.trim().toLowerCase();
     return activePoints
       .filter((point) => {
+        if (chapterFilter !== "all" && (point.chapter ?? "").trim() !== chapterFilter) {
+          return false;
+        }
         if (pointImportanceFilter !== "all" && point.importance !== pointImportanceFilter) {
           return false;
         }
@@ -1713,7 +2323,7 @@ function ReadingPage() {
         if (!query) return true;
         return (
           point.title.toLowerCase().includes(query) ||
-          point.concept.toLowerCase().includes(query) ||
+          stripHtml(point.concept).toLowerCase().includes(query) ||
           (point.chapter ?? "").toLowerCase().includes(query) ||
           point.tags.some((tag) => tag.toLowerCase().includes(query))
         );
@@ -1725,7 +2335,25 @@ function ReadingPage() {
         }
         return b.updatedAt.localeCompare(a.updatedAt);
       });
-  }, [activePoints, pointSearch, pointImportanceFilter, dueOnly, pointSortBy, todayKey]);
+  }, [activePoints, pointSearch, pointImportanceFilter, dueOnly, pointSortBy, todayKey, chapterFilter]);
+
+  useEffect(() => {
+    if (!aiPointId && activePoints.length > 0) {
+      setAiPointId(activePoints[0].id);
+    }
+    if (aiPointId && !activePoints.some((point) => point.id === aiPointId)) {
+      setAiPointId(activePoints[0]?.id ?? "");
+    }
+  }, [aiPointId, activePoints]);
+
+  useEffect(() => {
+    if (!pointConceptEditor) return;
+    const currentHtml = pointConceptEditor.getHTML();
+    if ((pointConcept || "<p></p>") === currentHtml) return;
+    pointConceptEditor.commands.setContent(pointConcept || "<p></p>", {
+      emitUpdate: false,
+    });
+  }, [pointConceptEditor, pointConcept]);
   const reviewCurrentPoint = useMemo(
     () => knowledgePoints.find((point) => point.id === reviewSessionIds[reviewCursor]),
     [knowledgePoints, reviewSessionIds, reviewCursor]
@@ -1734,6 +2362,103 @@ function ReadingPage() {
   const reviewSessionCompleted =
     reviewSessionTotal > 0 &&
     (reviewCursor >= reviewSessionTotal || !reviewCurrentPoint);
+
+  const chapterBuckets = useMemo(() => {
+    const map = new Map<string, { label: string; count: number }>();
+    for (const point of activePoints) {
+      const chapterKey = (point.chapter ?? "").trim() || "__no_chapter__";
+      const current = map.get(chapterKey);
+      map.set(chapterKey, {
+        label:
+          chapterKey === "__no_chapter__"
+            ? t("reading.noChapter")
+            : t("reading.chapterLabel", { chapter: chapterKey }),
+        count: (current?.count ?? 0) + 1,
+      });
+    }
+    return Array.from(map.entries())
+      .map(([key, value]) => ({ key, ...value }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [activePoints, t]);
+
+  const allTagCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const point of knowledgePoints) {
+      for (const tag of point.tags) {
+        map.set(tag, (map.get(tag) ?? 0) + 1);
+      }
+    }
+    return Array.from(map.entries())
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+  }, [knowledgePoints]);
+
+  const allChapterCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const point of knowledgePoints) {
+      const chapter = (point.chapter ?? "").trim() || "__no_chapter__";
+      map.set(chapter, (map.get(chapter) ?? 0) + 1);
+    }
+    return Array.from(map.entries())
+      .map(([chapter, count]) => ({ chapter, count }))
+      .sort((a, b) => b.count - a.count || a.chapter.localeCompare(b.chapter));
+  }, [knowledgePoints]);
+
+  const crossBookRows = useMemo(() => {
+    const q = crossBookQuery.trim().toLowerCase();
+    return knowledgePoints.filter((point) => {
+      const chapter = (point.chapter ?? "").trim() || "__no_chapter__";
+      if (crossBookBookFilter !== "all" && point.bookId !== crossBookBookFilter) return false;
+      if (crossBookTagFilter !== "all" && !point.tags.includes(crossBookTagFilter)) return false;
+      if (crossBookChapterFilter !== "all" && chapter !== crossBookChapterFilter) return false;
+      if (!q) return true;
+      return (
+        point.title.toLowerCase().includes(q) ||
+        stripHtml(point.concept).toLowerCase().includes(q) ||
+        point.tags.some((tag) => tag.toLowerCase().includes(q)) ||
+        chapter.toLowerCase().includes(q)
+      );
+    });
+  }, [knowledgePoints, crossBookBookFilter, crossBookTagFilter, crossBookChapterFilter, crossBookQuery]);
+
+  const crossBookByTag = useMemo(() => {
+    const map = new Map<string, KnowledgePoint[]>();
+    for (const point of crossBookRows) {
+      const tags = point.tags.length > 0 ? point.tags : ["__untagged__"];
+      for (const tag of tags) {
+        const bucket = map.get(tag) ?? [];
+        bucket.push(point);
+        map.set(tag, bucket);
+      }
+    }
+    return Array.from(map.entries())
+      .map(([tag, points]) => ({ tag, points }))
+      .sort((a, b) => b.points.length - a.points.length || a.tag.localeCompare(b.tag));
+  }, [crossBookRows]);
+
+  const crossBookByChapter = useMemo(() => {
+    const map = new Map<string, KnowledgePoint[]>();
+    for (const point of crossBookRows) {
+      const chapterKey = (point.chapter ?? "").trim() || "__no_chapter__";
+      const bucket = map.get(chapterKey) ?? [];
+      bucket.push(point);
+      map.set(chapterKey, bucket);
+    }
+    return Array.from(map.entries())
+      .map(([chapter, points]) => ({ chapter, points }))
+      .sort((a, b) => b.points.length - a.points.length || a.chapter.localeCompare(b.chapter));
+  }, [crossBookRows]);
+  const crossBookPreviewLimit = 8;
+  const quickTagChips = useMemo(() => {
+    const selectedTag =
+      crossBookTagFilter !== "all"
+        ? allTagCounts.find((entry) => entry.tag === crossBookTagFilter)
+        : undefined;
+    const pool = selectedTag
+      ? [selectedTag, ...allTagCounts.filter((entry) => entry.tag !== selectedTag.tag)]
+      : allTagCounts;
+    return pool.slice(0, 12);
+  }, [allTagCounts, crossBookTagFilter]);
 
   function startReviewSession() {
     if (reviewDuePoints.length === 0) return;
@@ -1764,6 +2489,34 @@ function ReadingPage() {
 
   function isPointDue(nextReviewDate?: string): boolean {
     return Boolean(nextReviewDate && nextReviewDate.slice(0, 10) <= todayKey);
+  }
+
+  function jumpToChapter(chapterKey: string) {
+    setChapterFilter(chapterKey);
+    const chapterValue = chapterKey === "__no_chapter__" ? "" : chapterKey;
+    const firstPoint = activePoints.find(
+      (point) => ((point.chapter ?? "").trim() || "") === chapterValue
+    );
+    if (!firstPoint) return;
+    window.requestAnimationFrame(() => {
+      pointNodeRefs.current[firstPoint.id]?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  }
+
+  function focusKnowledgePointFromMap(point: KnowledgePoint) {
+    setActiveBookId(point.bookId);
+    setPointSearch(point.title);
+    setDueOnly(false);
+    setChapterFilter((point.chapter ?? "").trim() || "all");
+    window.setTimeout(() => {
+      pointNodeRefs.current[point.id]?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    }, 120);
   }
 
   function downloadTextFile(filename: string, content: string, mimeType: string): void {
@@ -1811,7 +2564,7 @@ function ReadingPage() {
         lines.push(`- Next Review: ${new Date(point.nextReviewDate).toLocaleDateString()}`);
       }
       lines.push("");
-      lines.push(point.concept);
+      lines.push(stripHtml(point.concept));
       lines.push("");
     }
     downloadTextFile(
@@ -1828,7 +2581,7 @@ function ReadingPage() {
       ...activePoints.map((point) =>
         [
           `${point.title}${point.chapter ? ` (Chapter ${point.chapter})` : ""}`,
-          point.concept,
+          stripHtml(point.concept),
           point.tags.join(" "),
         ]
           .map(escapeCsvCell)
@@ -1857,7 +2610,7 @@ function ReadingPage() {
             <p><strong>Importance:</strong> ${escapeHtml(point.importance)} | <strong>Confidence:</strong> ${point.confidence}/5</p>
             <p><strong>Tags:</strong> ${escapeHtml(tags)}</p>
             <p><strong>Next Review:</strong> ${escapeHtml(review)}</p>
-            <p>${escapeHtml(point.concept)}</p>
+            <p>${escapeHtml(stripHtml(point.concept))}</p>
           </article>
         `;
       })
@@ -1909,7 +2662,7 @@ function ReadingPage() {
 
   function onCreateKnowledgePoint(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!activeBookId || !pointTitle.trim() || !pointConcept.trim()) return;
+    if (!activeBookId || !pointTitle.trim() || !hasMeaningfulRichText(pointConcept)) return;
     upsertKnowledgePoint({
       id: editingPointId ?? undefined,
       bookId: activeBookId,
@@ -1950,14 +2703,224 @@ function ReadingPage() {
     setEditingPointId(null);
   }
 
+  async function runReadingAi(mode: "explain" | "gap" | "summary") {
+    if (!settings.aiEnabled) {
+      setAiReadingOutput(t("ai.messages.enableFirst"));
+      return;
+    }
+    if (!settings.aiFeatureReadingExplainer) {
+      setAiReadingOutput(t("ai.messages.readingExplainerDisabled"));
+      return;
+    }
+    if (!settings.aiPrivacyAcknowledged) {
+      setAiReadingOutput(t("ai.messages.acknowledgePrivacy"));
+      return;
+    }
+    if (settings.aiProvider === "byok" && !settings.aiApiKey.trim()) {
+      setAiReadingOutput(t("ai.messages.byokMissing"));
+      return;
+    }
+    const quota = consumeAiQuota(settings.aiProvider);
+    if (!quota.ok) {
+      setAiReadingOutput(t("ai.messages.freeTierReached"));
+      return;
+    }
+
+    const selectedPoint = activePoints.find((point) => point.id === aiPointId);
+    const chapterPoints = activePoints.filter(
+      (point) => selectedPoint?.chapter && point.chapter === selectedPoint.chapter
+    );
+    const promptMap = {
+      explain: selectedPoint
+        ? `Explain this concept for study retention: "${selectedPoint.title}" — ${stripHtml(
+            selectedPoint.concept
+          )}`
+        : "Explain a core concept from my current reading notes in simple terms.",
+      gap: `Identify likely missing knowledge areas from this book's current notes: ${activePoints
+        .slice(0, 20)
+        .map((point) => point.title)
+        .join(", ")}`,
+      summary: selectedPoint?.chapter
+        ? `Summarize chapter ${selectedPoint.chapter} from these notes: ${chapterPoints
+            .slice(0, 20)
+            .map((point) => `${point.title}: ${stripHtml(point.concept)}`)
+            .join(" | ")}`
+        : `Summarize key learnings from these notes: ${activePoints
+            .slice(0, 20)
+            .map((point) => `${point.title}: ${stripHtml(point.concept)}`)
+            .join(" | ")}`,
+    } as const;
+    const safePrompt = sanitizeAiPrompt(promptMap[mode]);
+    if (!safePrompt) {
+      setAiReadingOutput(t("ai.messages.invalidPrompt"));
+      return;
+    }
+
+    setAiReadingLoading(true);
+    setAiReadingOutput("");
+    try {
+      for await (const chunk of streamAiResponseLazy({
+        prompt: safePrompt,
+        moduleName: "Reading",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        apiKey: settings.aiApiKey,
+        context: {
+          knowledgePointsCount: knowledgePoints.length,
+          notesCount: chapterPoints.length,
+        },
+      })) {
+        setAiReadingOutput((prev) => prev + chunk);
+      }
+    } finally {
+      setAiReadingLoading(false);
+    }
+  }
+
+  function parseFlashcardDraftsFromOutput(output: string): GeneratedFlashcardDraft[] {
+    const lines = output.split(/\r?\n/);
+    const cards: GeneratedFlashcardDraft[] = [];
+    let currentSourceId = "";
+    let currentQuestion = "";
+    let currentAnswer = "";
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      if (line.startsWith("SOURCE_ID:")) {
+        if (currentSourceId && currentQuestion && currentAnswer) {
+          cards.push({
+            id: crypto.randomUUID(),
+            sourcePointId: currentSourceId,
+            question: currentQuestion,
+            answer: currentAnswer,
+            selected: true,
+          });
+          currentQuestion = "";
+          currentAnswer = "";
+        }
+        currentSourceId = line.replace("SOURCE_ID:", "").trim();
+        continue;
+      }
+      if (line.startsWith("Q:")) {
+        currentQuestion = line.replace("Q:", "").trim();
+        continue;
+      }
+      if (line.startsWith("A:")) {
+        currentAnswer = line.replace("A:", "").trim();
+      }
+    }
+    if (currentSourceId && currentQuestion && currentAnswer) {
+      cards.push({
+        id: crypto.randomUUID(),
+        sourcePointId: currentSourceId,
+        question: currentQuestion,
+        answer: currentAnswer,
+        selected: true,
+      });
+    }
+    return cards;
+  }
+
+  async function generateReadingFlashcards() {
+    if (!settings.aiEnabled) {
+      setAiFlashcardsOutput(t("ai.messages.enableFirst"));
+      return;
+    }
+    if (!settings.aiFeatureFlashcardGenerator) {
+      setAiFlashcardsOutput(t("ai.messages.flashcardDisabled"));
+      return;
+    }
+    if (!settings.aiPrivacyAcknowledged) {
+      setAiFlashcardsOutput(t("ai.messages.acknowledgePrivacy"));
+      return;
+    }
+    if (settings.aiProvider === "byok" && !settings.aiApiKey.trim()) {
+      setAiFlashcardsOutput(t("ai.messages.byokMissing"));
+      return;
+    }
+    const quota = consumeAiQuota(settings.aiProvider);
+    if (!quota.ok) {
+      setAiFlashcardsOutput(t("ai.messages.freeTierReached"));
+      return;
+    }
+
+    const selectedPoint = activePoints.find((point) => point.id === aiPointId);
+    const scopePoints =
+      aiFlashcardScope === "selected"
+        ? selectedPoint
+          ? [selectedPoint]
+          : []
+        : aiFlashcardScope === "chapter" && selectedPoint?.chapter
+          ? activePoints.filter((point) => point.chapter === selectedPoint.chapter).slice(0, 12)
+          : activePoints.slice(0, 12);
+    if (scopePoints.length === 0) {
+      setAiFlashcardsOutput(t("reading.selectKnowledgePointFirst"));
+      return;
+    }
+
+    const seedPayload = scopePoints
+      .map((point) => {
+        const compactConcept = stripHtml(point.concept).replace(/\s+/g, " ").trim().slice(0, 240);
+        return `${point.id}::${point.title}::${compactConcept}`;
+      })
+      .join(" || ");
+    const prompt = `[FLASHCARDS] ${seedPayload}`;
+    const safePrompt = sanitizeAiPrompt(prompt);
+    if (!safePrompt) {
+      setAiFlashcardsOutput(t("ai.messages.invalidPrompt"));
+      return;
+    }
+
+    setAiFlashcardsLoading(true);
+    setAiFlashcardsOutput("");
+    setFlashcardDrafts([]);
+    try {
+      let fullOutput = "";
+      for await (const chunk of streamAiResponseLazy({
+        prompt: safePrompt,
+        moduleName: "Reading",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        apiKey: settings.aiApiKey,
+        context: {
+          knowledgePointsCount: knowledgePoints.length,
+          notesCount: scopePoints.length,
+        },
+      })) {
+        fullOutput += chunk;
+        setAiFlashcardsOutput(fullOutput);
+      }
+      const parsed = parseFlashcardDraftsFromOutput(fullOutput);
+      setFlashcardDrafts(parsed);
+      if (parsed.length === 0) {
+        setAiFlashcardsOutput(t("reading.flashcardsParseError"));
+      }
+    } finally {
+      setAiFlashcardsLoading(false);
+    }
+  }
+
+  function pushGeneratedFlashcardsToReviewQueue() {
+    const selectedIds = flashcardDrafts
+      .filter((card) => card.selected)
+      .map((card) => card.sourcePointId);
+    const uniqueIds = [...new Set(selectedIds)];
+    if (uniqueIds.length === 0) {
+      setAiFlashcardsOutput(t("reading.selectGeneratedFlashcardFirst"));
+      return;
+    }
+    enqueueKnowledgePointsForReview(uniqueIds);
+    setAiFlashcardsOutput(t("reading.queuedForReview", { count: uniqueIds.length }));
+  }
+
   return (
     <PageCard
-      title="Reading Tracker"
-      subtitle="Track textbooks and capture chapter-level knowledge points."
+      title={t("pages.reading.title")}
+      subtitle={t("pages.reading.subtitle")}
     >
       <div className="actions-row">
         <button type="button" onClick={() => setShowBookForm((prev) => !prev)}>
-          {showBookForm ? "Hide New Book Form" : "Add Book"}
+          {showBookForm ? t("reading.hideNewBookForm") : t("reading.addBook")}
         </button>
         <button
           type="button"
@@ -1965,7 +2928,7 @@ function ReadingPage() {
           disabled={!activeBookId}
           onClick={() => setShowPointForm((prev) => !prev)}
         >
-          {showPointForm ? "Hide Knowledge Point Form" : "Add Knowledge Point"}
+          {showPointForm ? t("reading.hideKnowledgePointForm") : t("reading.addKnowledgePoint")}
         </button>
         {showPointForm && (
           <button
@@ -1976,7 +2939,7 @@ function ReadingPage() {
               resetPointForm();
             }}
           >
-            Cancel Edit
+            {t("reading.cancelEdit")}
           </button>
         )}
       </div>
@@ -1985,11 +2948,11 @@ function ReadingPage() {
         <form className="problem-form" onSubmit={onCreateBook}>
           <div className="problem-form-grid">
             <label>
-              <span>Book Title</span>
+              <span>{t("reading.bookTitle")}</span>
               <input value={bookTitle} onChange={(e) => setBookTitle(e.target.value)} required />
             </label>
             <label>
-              <span>Author</span>
+              <span>{t("reading.author")}</span>
               <input
                 value={bookAuthor}
                 onChange={(e) => setBookAuthor(e.target.value)}
@@ -1997,18 +2960,18 @@ function ReadingPage() {
               />
             </label>
             <label>
-              <span>Status</span>
+              <span>{t("reading.status")}</span>
               <select
                 value={bookStatus}
                 onChange={(e) => setBookStatus(e.target.value as BookStatus)}
               >
-                <option value="reading">Reading</option>
-                <option value="planned">Planned</option>
-                <option value="completed">Completed</option>
+                <option value="reading">{t("reading.statusReading")}</option>
+                <option value="planned">{t("reading.statusPlanned")}</option>
+                <option value="completed">{t("reading.statusCompleted")}</option>
               </select>
             </label>
             <label>
-              <span>Total Chapters</span>
+              <span>{t("reading.totalChapters")}</span>
               <input
                 type="number"
                 min={1}
@@ -2018,7 +2981,7 @@ function ReadingPage() {
             </label>
           </div>
           <div className="actions-row">
-            <button type="submit">Save Book</button>
+            <button type="submit">{t("reading.saveBook")}</button>
           </div>
         </form>
       )}
@@ -2027,7 +2990,7 @@ function ReadingPage() {
         <form className="problem-form" onSubmit={onCreateKnowledgePoint}>
           <div className="problem-form-grid">
             <label>
-              <span>Knowledge Point Title</span>
+              <span>{t("reading.knowledgePointTitle")}</span>
               <input
                 value={pointTitle}
                 onChange={(e) => setPointTitle(e.target.value)}
@@ -2035,22 +2998,22 @@ function ReadingPage() {
               />
             </label>
             <label>
-              <span>Chapter</span>
+              <span>{t("reading.chapter")}</span>
               <input value={pointChapter} onChange={(e) => setPointChapter(e.target.value)} />
             </label>
             <label>
-              <span>Importance</span>
+              <span>{t("reading.importance")}</span>
               <select
                 value={pointImportance}
                 onChange={(e) => setPointImportance(e.target.value as Importance)}
               >
-                <option value="Core">Core</option>
-                <option value="Supporting">Supporting</option>
-                <option value="NiceToKnow">NiceToKnow</option>
+                <option value="Core">{t("reading.importanceCore")}</option>
+                <option value="Supporting">{t("reading.importanceSupporting")}</option>
+                <option value="NiceToKnow">{t("reading.importanceNiceToKnow")}</option>
               </select>
             </label>
             <label>
-              <span>Confidence (1-5)</span>
+              <span>{t("reading.confidenceOneToFive")}</span>
               <select
                 value={pointConfidence}
                 onChange={(e) => setPointConfidence(e.target.value as "1" | "2" | "3" | "4" | "5")}
@@ -2063,26 +3026,77 @@ function ReadingPage() {
               </select>
             </label>
             <label className="full-width">
-              <span>Tags (comma-separated)</span>
+              <span>{t("reading.tagsCommaSeparated")}</span>
               <input
                 value={pointTags}
                 onChange={(e) => setPointTags(e.target.value)}
-                placeholder="Algorithms, DP, Graph"
+                placeholder={t("reading.tagsPlaceholder")}
               />
             </label>
             <label className="full-width">
-              <span>Concept</span>
-              <textarea
-                rows={4}
-                value={pointConcept}
-                onChange={(e) => setPointConcept(e.target.value)}
-                required
-              />
+              <span>{t("reading.concept")}</span>
+              <div className="notes-toolbar compact-toolbar">
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => pointConceptEditor?.chain().focus().toggleBold().run()}
+                  disabled={!pointConceptEditor}
+                >
+                  {t("notes.bold")}
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => pointConceptEditor?.chain().focus().toggleItalic().run()}
+                  disabled={!pointConceptEditor}
+                >
+                  {t("notes.italic")}
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => pointConceptEditor?.chain().focus().toggleCode().run()}
+                  disabled={!pointConceptEditor}
+                >
+                  {t("reading.inlineCode")}
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => pointConceptEditor?.chain().focus().toggleCodeBlock().run()}
+                  disabled={!pointConceptEditor}
+                >
+                  {t("reading.codeBlock")}
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => pointConceptEditor?.chain().focus().insertContent("$x^2$").run()}
+                  disabled={!pointConceptEditor}
+                >
+                  {t("reading.inlineMath")}
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() =>
+                    pointConceptEditor?.chain().focus().insertContent("$$\n\\int_a^b f(x)\\,dx\n$$").run()
+                  }
+                  disabled={!pointConceptEditor}
+                >
+                  {t("reading.blockMath")}
+                </button>
+              </div>
+              <div className="reading-concept-editor">
+                <EditorContent editor={pointConceptEditor} />
+              </div>
             </label>
           </div>
           <div className="actions-row">
             <button type="submit">
-              {editingPointId ? "Update Knowledge Point" : "Save Knowledge Point"}
+              {editingPointId
+                ? t("reading.updateKnowledgePoint")
+                : t("reading.saveKnowledgePoint")}
             </button>
           </div>
         </form>
@@ -2091,7 +3105,7 @@ function ReadingPage() {
       {activeBook && (
         <div className="filters-row reading-filters">
           <input
-            placeholder="Search title, concept, chapter, tag"
+            placeholder={t("reading.searchPlaceholder")}
             value={pointSearch}
             onChange={(e) => setPointSearch(e.target.value)}
           />
@@ -2099,10 +3113,10 @@ function ReadingPage() {
             value={pointImportanceFilter}
             onChange={(e) => setPointImportanceFilter(e.target.value as "all" | Importance)}
           >
-            <option value="all">All Importance</option>
-            <option value="Core">Core</option>
-            <option value="Supporting">Supporting</option>
-            <option value="NiceToKnow">NiceToKnow</option>
+            <option value="all">{t("reading.allImportance")}</option>
+            <option value="Core">{t("reading.importanceCore")}</option>
+            <option value="Supporting">{t("reading.importanceSupporting")}</option>
+            <option value="NiceToKnow">{t("reading.importanceNiceToKnow")}</option>
           </select>
           <select
             value={pointSortBy}
@@ -2110,9 +3124,17 @@ function ReadingPage() {
               setPointSortBy(e.target.value as "updatedAt" | "nextReviewDate" | "confidence")
             }
           >
-            <option value="updatedAt">Sort: Last Updated</option>
-            <option value="nextReviewDate">Sort: Next Review</option>
-            <option value="confidence">Sort: Confidence</option>
+            <option value="updatedAt">{t("reading.sortLastUpdated")}</option>
+            <option value="nextReviewDate">{t("reading.sortNextReview")}</option>
+            <option value="confidence">{t("reading.sortConfidence")}</option>
+          </select>
+          <select value={chapterFilter} onChange={(e) => setChapterFilter(e.target.value)}>
+            <option value="all">{t("reading.allChapters")}</option>
+            {chapterBuckets.map((chapter) => (
+              <option key={chapter.key} value={chapter.key}>
+                {chapter.label} ({chapter.count})
+              </option>
+            ))}
           </select>
           <label className="due-only-toggle">
             <input
@@ -2120,21 +3142,24 @@ function ReadingPage() {
               checked={dueOnly}
               onChange={(e) => setDueOnly(e.target.checked)}
             />
-            Due only
+            {t("reading.dueOnly")}
           </label>
         </div>
       )}
 
       {activeBook && (
         <article className="tile flashcard-session">
-          <h2>Flashcard Review</h2>
+          <h2>{t("reading.flashcardReviewTitle")}</h2>
           <small>
-            {reviewDuePoints.length} due right now for {activeBook.title}
+            {t("reading.dueRightNowForBook", {
+              count: reviewDuePoints.length,
+              title: activeBook.title,
+            })}
           </small>
           {reviewSessionTotal === 0 && (
             <div className="actions-row">
               <button type="button" onClick={startReviewSession} disabled={reviewDuePoints.length === 0}>
-                Start Review Session
+                {t("reading.startReviewSession")}
               </button>
             </div>
           )}
@@ -2142,14 +3167,14 @@ function ReadingPage() {
           {reviewSessionTotal > 0 && !reviewSessionCompleted && reviewCurrentPoint && (
             <div className="flashcard-body">
               <small>
-                Card {reviewCursor + 1} / {reviewSessionTotal}
+                {t("reading.cardProgress", { current: reviewCursor + 1, total: reviewSessionTotal })}
               </small>
               <h3>{reviewCurrentPoint.title}</h3>
               <small>
                 {reviewCurrentPoint.chapter
-                  ? `Chapter ${reviewCurrentPoint.chapter}`
-                  : "No chapter"}{" "}
-                • {reviewCurrentPoint.importance}
+                  ? t("reading.chapterLabel", { chapter: reviewCurrentPoint.chapter })
+                  : t("reading.noChapter")}{" "}
+                • {getImportanceLabel(reviewCurrentPoint.importance)}
               </small>
               {reviewCurrentPoint.tags.length > 0 && (
                 <div className="chip-list">
@@ -2163,25 +3188,28 @@ function ReadingPage() {
               {!reviewRevealed ? (
                 <div className="actions-row">
                   <button type="button" onClick={() => setReviewRevealed(true)}>
-                    Reveal Concept
+                    {t("reading.revealConcept")}
                   </button>
                   <button type="button" className="button-secondary" onClick={stopReviewSession}>
-                    End Session
+                    {t("reading.endSession")}
                   </button>
                 </div>
               ) : (
                 <>
-                  <p>{reviewCurrentPoint.concept}</p>
+                  <div
+                    className="knowledge-rich-content"
+                    dangerouslySetInnerHTML={{ __html: reviewCurrentPoint.concept }}
+                  />
                   <div className="actions-row">
                     <button type="button" onClick={() => gradeCurrentFlashcard("good")}>
-                      I Recalled It
+                      {t("reading.iRecalledIt")}
                     </button>
                     <button
                       type="button"
                       className="button-secondary"
                       onClick={() => gradeCurrentFlashcard("shaky")}
                     >
-                      Need More Work
+                      {t("reading.needMoreWork")}
                     </button>
                   </div>
                 </>
@@ -2192,14 +3220,17 @@ function ReadingPage() {
           {reviewSessionCompleted && (
             <div className="flashcard-body">
               <p>
-                You reviewed {reviewedCount} cards. {reviewNeedsWorkCount} need more work.
+                {t("reading.reviewSessionSummary", {
+                  reviewed: reviewedCount,
+                  needsWork: reviewNeedsWorkCount,
+                })}
               </p>
               <div className="actions-row">
                 <button type="button" onClick={startReviewSession} disabled={reviewDuePoints.length === 0}>
-                  Review Due Cards Again
+                  {t("reading.reviewDueCardsAgain")}
                 </button>
                 <button type="button" className="button-secondary" onClick={stopReviewSession}>
-                  Close Session
+                  {t("reading.closeSession")}
                 </button>
               </div>
             </div>
@@ -2207,73 +3238,410 @@ function ReadingPage() {
         </article>
       )}
 
-      <div className="reading-layout">
-        <article className="tile">
-          <h2>Bookshelf</h2>
-          {books.length === 0 && <p>No books added yet.</p>}
-          <ul className="books-list">
-            {books.map((book) => (
-              <li
-                key={book.id}
-                className={`book-row${activeBookId === book.id ? " book-row-active" : ""}`}
-              >
-                <button
-                  type="button"
-                  className="book-select"
-                  onClick={() => setActiveBookId(book.id)}
-                >
-                  <strong>{book.title}</strong>
-                  <small>
-                    {book.author} • {book.status}
-                  </small>
-                </button>
-                <button
-                  type="button"
-                  className="button-danger"
-                  onClick={() => deleteBook(book.id)}
-                >
-                  Delete
-                </button>
-              </li>
-            ))}
-          </ul>
+      {activeBook && (
+        <article className="tile leetcode-ai-panel">
+          <h2>{t("reading.aiTitle")}</h2>
+          <p>{t("reading.aiDesc")}</p>
+          <div className="filters-row">
+            <select value={aiPointId} onChange={(event) => setAiPointId(event.target.value)}>
+              <option value="">{t("reading.selectKnowledgePoint")}</option>
+              {activePoints.slice(0, 250).map((point) => (
+                <option key={point.id} value={point.id}>
+                  {point.chapter ? t("reading.chapterShort", { chapter: point.chapter }) : ""}
+                  {point.title}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="button-secondary"
+              disabled={aiReadingLoading}
+              onClick={() => void runReadingAi("explain")}
+            >
+              {t("reading.explainConcept")}
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              disabled={aiReadingLoading}
+              onClick={() => void runReadingAi("gap")}
+            >
+              {t("reading.detectGaps")}
+            </button>
+          </div>
+          <div className="actions-row">
+            <button
+              type="button"
+              className="button-secondary"
+              disabled={aiReadingLoading}
+              onClick={() => void runReadingAi("summary")}
+            >
+              {t("reading.summarizeChapter")}
+            </button>
+            <select
+              value={aiFlashcardScope}
+              onChange={(event) =>
+                setAiFlashcardScope(event.target.value as "selected" | "chapter" | "book")
+              }
+            >
+              <option value="selected">{t("reading.flashcardsSelectedPoint")}</option>
+              <option value="chapter">{t("reading.flashcardsCurrentChapter")}</option>
+              <option value="book">{t("reading.flashcardsCurrentBook")}</option>
+            </select>
+            <button
+              type="button"
+              className="button-secondary"
+              disabled={aiFlashcardsLoading}
+              onClick={() => void generateReadingFlashcards()}
+            >
+              {t("reading.generateFlashcards")}
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              disabled={aiFlashcardsLoading || flashcardDrafts.length === 0}
+              onClick={pushGeneratedFlashcardsToReviewQueue}
+            >
+              {t("reading.addSelectedToReviewQueue")}
+            </button>
+          </div>
+          <div className="ai-inline-output">
+            {aiReadingLoading && <small>{t("reading.generatingResponse")}</small>}
+            {!aiReadingLoading && !aiReadingOutput && (
+              <small>{t("reading.aiRunPrompt")}</small>
+            )}
+            {aiReadingOutput && <pre>{aiReadingOutput}</pre>}
+          </div>
+          <div className="ai-inline-output">
+            {aiFlashcardsLoading && <small>{t("reading.generatingFlashcards")}</small>}
+            {!aiFlashcardsLoading && flashcardDrafts.length === 0 && (
+              <small>{t("reading.flashcardsEmptyPrompt")}</small>
+            )}
+            {flashcardDrafts.length > 0 && (
+              <div className="knowledge-content">
+                {flashcardDrafts.map((card) => (
+                  <div key={card.id} className="problem-form">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={card.selected}
+                        onChange={(event) =>
+                          setFlashcardDrafts((current) =>
+                            current.map((item) =>
+                              item.id === card.id ? { ...item, selected: event.target.checked } : item
+                            )
+                          )
+                        }
+                      />
+                      {t("reading.includeInQueue")}
+                    </label>
+                    <label>
+                      <span>{t("reading.question")}</span>
+                      <input
+                        value={card.question}
+                        onChange={(event) =>
+                          setFlashcardDrafts((current) =>
+                            current.map((item) =>
+                              item.id === card.id ? { ...item, question: event.target.value } : item
+                            )
+                          )
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>{t("reading.answer")}</span>
+                      <textarea
+                        rows={3}
+                        value={card.answer}
+                        onChange={(event) =>
+                          setFlashcardDrafts((current) =>
+                            current.map((item) =>
+                              item.id === card.id ? { ...item, answer: event.target.value } : item
+                            )
+                          )
+                        }
+                      />
+                    </label>
+                  </div>
+                ))}
+              </div>
+            )}
+            {aiFlashcardsOutput && <pre>{aiFlashcardsOutput}</pre>}
+          </div>
         </article>
+      )}
+
+      <article className="tile cross-book-map">
+        <h2>{t("reading.crossBookMapTitle")}</h2>
+        <p>{t("reading.crossBookMapDesc")}</p>
+        <div className="filters-row cross-book-filters">
+          <input
+            value={crossBookQuery}
+            onChange={(event) => setCrossBookQuery(event.target.value)}
+            placeholder={t("reading.crossBookSearchPlaceholder")}
+          />
+          <select
+            value={crossBookBookFilter}
+            onChange={(event) => setCrossBookBookFilter(event.target.value)}
+          >
+            <option value="all">{t("reading.allBooks")}</option>
+            {books.map((book) => (
+              <option key={book.id} value={book.id}>
+                {book.title}
+              </option>
+            ))}
+          </select>
+          <select
+            value={crossBookTagFilter}
+            onChange={(event) => setCrossBookTagFilter(event.target.value)}
+          >
+            <option value="all">{t("reading.allTags")}</option>
+            {allTagCounts.map((tag) => (
+              <option key={tag.tag} value={tag.tag}>
+                {tag.tag} ({tag.count})
+              </option>
+            ))}
+          </select>
+          <select
+            value={crossBookChapterFilter}
+            onChange={(event) => setCrossBookChapterFilter(event.target.value)}
+          >
+            <option value="all">{t("reading.allChapters")}</option>
+            {allChapterCounts.map((chapter) => (
+              <option key={chapter.chapter} value={chapter.chapter}>
+                {(chapter.chapter === "__no_chapter__"
+                  ? t("reading.noChapter")
+                  : t("reading.chapterLabel", { chapter: chapter.chapter })) +
+                  ` (${chapter.count})`}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="quick-chip-row">
+          <span>{t("reading.quickTagFilters")}</span>
+          <button
+            type="button"
+            className={`topic-chip${crossBookTagFilter === "all" ? " topic-chip-active" : ""}`}
+            onClick={() => setCrossBookTagFilter("all")}
+          >
+            {t("reading.allTags")}
+          </button>
+          {quickTagChips.map((tag) => (
+            <button
+              type="button"
+              key={tag.tag}
+              className={`topic-chip${crossBookTagFilter === tag.tag ? " topic-chip-active" : ""}`}
+              onClick={() => setCrossBookTagFilter(tag.tag)}
+            >
+              {tag.tag} ({tag.count})
+            </button>
+          ))}
+        </div>
+        <div className="cross-book-meta-row">
+          <small>{t("reading.matchedPointsSummary", { count: crossBookRows.length })}</small>
+          <small>{t("reading.tagGroupsSummary", { count: crossBookByTag.length })}</small>
+          <small>{t("reading.chapterGroupsSummary", { count: crossBookByChapter.length })}</small>
+        </div>
+        <div className="cross-book-group-layout">
+          <section>
+            <h3>{t("reading.groupedByTag")}</h3>
+            {crossBookByTag.length === 0 && <p>{t("reading.noCrossBookMatches")}</p>}
+            {crossBookByTag.map((group) => (
+              <details key={group.tag} className="cross-book-group">
+                <summary>
+                  <strong>
+                    {group.tag === "__untagged__" ? t("reading.untagged") : group.tag}
+                  </strong>
+                  <small>{t("reading.pointsCount", { count: group.points.length })}</small>
+                </summary>
+                <ul className="cross-book-point-list">
+                  {group.points.slice(0, crossBookPreviewLimit).map((point) => {
+                    const pointBook = books.find((book) => book.id === point.bookId);
+                    return (
+                      <li key={`${group.tag}-${point.id}`}>
+                        <button type="button" onClick={() => focusKnowledgePointFromMap(point)}>
+                          <strong>{point.title}</strong>
+                          <small>
+                            {(pointBook?.title ?? t("reading.unknownBook"))} •{" "}
+                            {point.chapter
+                              ? t("reading.chapterLabel", { chapter: point.chapter })
+                              : t("reading.noChapter")}
+                          </small>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+                {group.points.length > crossBookPreviewLimit && (
+                  <small className="cross-book-preview-note">
+                    {t("reading.showingPreviewCount", {
+                      shown: crossBookPreviewLimit,
+                      total: group.points.length,
+                    })}
+                  </small>
+                )}
+              </details>
+            ))}
+          </section>
+          <section>
+            <h3>{t("reading.groupedByChapter")}</h3>
+            {crossBookByChapter.length === 0 && <p>{t("reading.noCrossBookMatches")}</p>}
+            {crossBookByChapter.map((group) => (
+              <details key={group.chapter} className="cross-book-group">
+                <summary>
+                  <strong>
+                    {group.chapter === "__no_chapter__"
+                      ? t("reading.noChapter")
+                      : t("reading.chapterLabel", { chapter: group.chapter })}
+                  </strong>
+                  <small>{t("reading.pointsCount", { count: group.points.length })}</small>
+                </summary>
+                <ul className="cross-book-point-list">
+                  {group.points.slice(0, crossBookPreviewLimit).map((point) => {
+                    const pointBook = books.find((book) => book.id === point.bookId);
+                    return (
+                      <li key={`${group.chapter}-${point.id}`}>
+                        <button type="button" onClick={() => focusKnowledgePointFromMap(point)}>
+                          <strong>{point.title}</strong>
+                          <small>
+                            {(pointBook?.title ?? t("reading.unknownBook"))} •{" "}
+                            {point.tags.slice(0, 3).join(", ") || t("reading.untagged")}
+                          </small>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+                {group.points.length > crossBookPreviewLimit && (
+                  <small className="cross-book-preview-note">
+                    {t("reading.showingPreviewCount", {
+                      shown: crossBookPreviewLimit,
+                      total: group.points.length,
+                    })}
+                  </small>
+                )}
+              </details>
+            ))}
+          </section>
+        </div>
+      </article>
+
+      <div className="reading-layout">
+        <div className="reading-side-column">
+          <article className="tile">
+            <h2>{t("reading.bookshelf")}</h2>
+            {books.length === 0 && <p>{t("reading.noBooksYet")}</p>}
+            <ul className="books-list">
+              {books.map((book) => (
+                <li
+                  key={book.id}
+                  className={`book-row${activeBookId === book.id ? " book-row-active" : ""}`}
+                >
+                  <button
+                    type="button"
+                    className="book-select"
+                    onClick={() => setActiveBookId(book.id)}
+                  >
+                    <strong>{book.title}</strong>
+                    <small>
+                      {book.author} • {getBookStatusLabel(book.status)}
+                    </small>
+                  </button>
+                  <button
+                    type="button"
+                    className="button-danger"
+                    onClick={() => deleteBook(book.id)}
+                  >
+                    {t("common.delete")}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </article>
+          {activeBook && (
+            <article className="tile chapter-index-tile">
+              <h2>{t("reading.chapterOutline")}</h2>
+              <div className="chapter-index-actions">
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => setChapterFilter("all")}
+                >
+                  {t("reading.showAllChapters")}
+                </button>
+              </div>
+              {chapterBuckets.length === 0 && <p>{t("reading.noChapterOutlineYet")}</p>}
+              {chapterBuckets.length > 0 && (
+                <ul className="chapter-index-list">
+                  {chapterBuckets.map((chapter) => (
+                    <li key={chapter.key}>
+                      <button
+                        type="button"
+                        className={chapterFilter === chapter.key ? "chapter-jump-active" : undefined}
+                        onClick={() => jumpToChapter(chapter.key)}
+                      >
+                        <span>{chapter.label}</span>
+                        <small>{chapter.count}</small>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </article>
+          )}
+        </div>
 
         <article className="tile">
-          <h2>Knowledge Points {activeBook ? `for ${activeBook.title}` : ""}</h2>
+          <h2>
+            {activeBook
+              ? t("reading.knowledgePointsForBook", { title: activeBook.title })
+              : t("reading.knowledgePoints")}
+          </h2>
           {activeBook && (
             <small>
-              {activePoints.length} total • {reviewDuePoints.length} due review
+              {t("reading.totalAndDueReview", {
+                total: activePoints.length,
+                due: reviewDuePoints.length,
+              })}
             </small>
           )}
           {activeBook && (
             <div className="actions-row export-actions">
               <button type="button" onClick={exportBookMarkdown}>
-                Export Markdown
+                {t("reading.exportMarkdown")}
               </button>
               <button type="button" className="button-secondary" onClick={exportBookPdf}>
-                Export PDF
+                {t("reading.exportPdf")}
               </button>
               <button type="button" className="button-secondary" onClick={exportBookAnkiCsv}>
-                Export Anki CSV
+                {t("reading.exportAnkiCsv")}
               </button>
             </div>
           )}
-          {!activeBook && <p>Select a book to view knowledge points.</p>}
+          {!activeBook && <p>{t("reading.selectBookPrompt")}</p>}
           {activeBook && filteredPoints.length === 0 && (
-            <p>No matching knowledge points yet.</p>
+            <p>{t("reading.noMatchingKnowledgePoints")}</p>
           )}
           {activeBook && filteredPoints.length > 0 && (
             <ul className="knowledge-list">
               {filteredPoints.map((point) => (
-                <li key={point.id} className="knowledge-row">
+                <li
+                  key={point.id}
+                  className="knowledge-row"
+                  ref={(node) => {
+                    pointNodeRefs.current[point.id] = node;
+                  }}
+                >
                   <details className="knowledge-accordion" open={dueOnly || isPointDue(point.nextReviewDate)}>
                     <summary>
                       <div className="knowledge-summary-title">
                         <strong>{point.title}</strong>
                         <small>
-                          {point.chapter ? `Chapter ${point.chapter}` : "No chapter"} •{" "}
-                          {point.importance} • confidence {point.confidence}
+                          {point.chapter
+                            ? t("reading.chapterLabel", { chapter: point.chapter })
+                            : t("reading.noChapter")}{" "}
+                          • {getImportanceLabel(point.importance)} •{" "}
+                          {t("reading.confidenceLabel", { confidence: point.confidence })}
                         </small>
                       </div>
                       {point.nextReviewDate && (
@@ -2284,17 +3652,22 @@ function ReadingPage() {
                               : "badge-status-attempted"
                           }`}
                         >
-                          {isPointDue(point.nextReviewDate) ? "Due" : "Upcoming"}
+                          {isPointDue(point.nextReviewDate) ? t("reading.due") : t("reading.upcoming")}
                         </span>
                       )}
                     </summary>
                     <div className="knowledge-content">
                       {point.nextReviewDate && (
                         <small>
-                          Review date: {new Date(point.nextReviewDate).toLocaleDateString()}
+                          {t("reading.reviewDate", {
+                            date: new Date(point.nextReviewDate).toLocaleDateString(),
+                          })}
                         </small>
                       )}
-                      <p>{point.concept}</p>
+                      <div
+                        className="knowledge-rich-content"
+                        dangerouslySetInnerHTML={{ __html: point.concept }}
+                      />
                       {point.tags.length > 0 && (
                         <div className="chip-list">
                           {point.tags.map((tag) => (
@@ -2306,7 +3679,7 @@ function ReadingPage() {
                       )}
                       <div className="inline-actions">
                         <button type="button" onClick={() => startEditPoint(point.id)}>
-                          Edit
+                          {t("common.edit")}
                         </button>
                         <button
                           type="button"
@@ -2314,7 +3687,7 @@ function ReadingPage() {
                           disabled={!point.nextReviewDate}
                           onClick={() => markKnowledgePointReviewResult(point.id, "good")}
                         >
-                          Reviewed (Good)
+                          {t("reading.reviewedGood")}
                         </button>
                         <button
                           type="button"
@@ -2322,14 +3695,14 @@ function ReadingPage() {
                           disabled={!point.nextReviewDate}
                           onClick={() => markKnowledgePointReviewResult(point.id, "shaky")}
                         >
-                          Reviewed (Shaky)
+                          {t("reading.reviewedShaky")}
                         </button>
                         <button
                           type="button"
                           className="button-danger"
                           onClick={() => deleteKnowledgePoint(point.id)}
                         >
-                          Delete
+                          {t("common.delete")}
                         </button>
                       </div>
                     </div>
@@ -2345,10 +3718,20 @@ function ReadingPage() {
 }
 
 function CalendarPage() {
+  const { t } = useTranslation();
   type CalendarViewEvent = CalendarEvent & {
     occurrenceId: string;
     sourceEventId: string;
     isRecurringInstance: boolean;
+  };
+  type CalendarPlanDraft = {
+    id: string;
+    selected: boolean;
+    title: string;
+    date: string;
+    time: string;
+    durationMinutes: number;
+    type: EventType;
   };
 
   const events = useAppStore((state) => state.events);
@@ -2356,6 +3739,7 @@ function CalendarPage() {
   const upsertEvent = useAppStore((state) => state.upsertEvent);
   const deleteEvent = useAppStore((state) => state.deleteEvent);
   const problems = useAppStore((state) => state.problems);
+  const knowledgePoints = useAppStore((state) => state.knowledgePoints);
   const books = useAppStore((state) => state.books);
   const navigate = useNavigate();
   const [viewMode, setViewMode] = useState<"day" | "week" | "month" | "agenda">("week");
@@ -2387,7 +3771,10 @@ function CalendarPage() {
   const [lastCompletedFocusSeconds, setLastCompletedFocusSeconds] = useState<number | null>(null);
   const [lastCompletedFocusAt, setLastCompletedFocusAt] = useState<string | null>(null);
   const [timerLogType, setTimerLogType] = useState<"study" | "leetcode">("study");
-  const [timerLogTitle, setTimerLogTitle] = useState("Pomodoro Session");
+  const [timerLogTitle, setTimerLogTitle] = useState(t("calendar.pomodoroSession"));
+  const [aiCalendarOutput, setAiCalendarOutput] = useState("");
+  const [aiCalendarLoading, setAiCalendarLoading] = useState(false);
+  const [calendarPlanDrafts, setCalendarPlanDrafts] = useState<CalendarPlanDraft[]>([]);
   const [dragCreateStartSlot, setDragCreateStartSlot] = useState<number | null>(null);
   const [dragCreateEndSlot, setDragCreateEndSlot] = useState<number | null>(null);
   const [resizingEventId, setResizingEventId] = useState<string | null>(null);
@@ -2404,6 +3791,30 @@ function CalendarPage() {
     const dt = new Date(iso);
     const offsetMs = dt.getTimezoneOffset() * 60000;
     return new Date(dt.getTime() - offsetMs).toISOString().slice(0, 16);
+  }
+
+  function getViewModeLabel(mode: "day" | "week" | "month" | "agenda"): string {
+    if (mode === "day") return t("calendar.day");
+    if (mode === "week") return t("calendar.week");
+    if (mode === "month") return t("calendar.month");
+    return t("calendar.agenda");
+  }
+
+  function getEventTypeLabel(type: EventType): string {
+    if (type === "class") return t("calendar.eventTypeClass");
+    if (type === "study") return t("calendar.eventTypeStudy");
+    if (type === "leetcode") return t("calendar.eventTypeLeetCode");
+    if (type === "deadline") return t("calendar.eventTypeDeadline");
+    if (type === "meeting") return t("calendar.eventTypeMeeting");
+    if (type === "personal") return t("calendar.eventTypePersonal");
+    return t("calendar.eventTypeCustom");
+  }
+
+  function getLinkedModuleLabel(moduleName: "leetcode" | "reading" | "notes" | "groups"): string {
+    if (moduleName === "leetcode") return t("modules.leetcode");
+    if (moduleName === "reading") return t("modules.reading");
+    if (moduleName === "notes") return t("modules.notes");
+    return t("modules.groups");
   }
 
   function toIsoFromLocalInput(localValue: string): string {
@@ -2544,6 +3955,24 @@ function CalendarPage() {
     settings.quietHoursEnd,
     sortedEvents,
   ]);
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const reviewDueProblemsCount = useMemo(
+    () =>
+      problems.filter(
+        (item) =>
+          item.nextReviewDate &&
+          item.nextReviewDate.slice(0, 10) <= todayKey &&
+          (item.status === "Solved" || item.status === "Review")
+      ).length,
+    [problems, todayKey]
+  );
+  const reviewDueKnowledgeCount = useMemo(
+    () =>
+      knowledgePoints.filter(
+        (item) => item.nextReviewDate && item.nextReviewDate.slice(0, 10) <= todayKey
+      ).length,
+    [knowledgePoints, todayKey]
+  );
 
   const groupedEvents = useMemo(() => {
     return visibleEvents.reduce<Record<string, CalendarViewEvent[]>>((acc, event) => {
@@ -2759,12 +4188,12 @@ function CalendarPage() {
     const start = new Date(end);
     start.setSeconds(start.getSeconds() - lastCompletedFocusSeconds);
     upsertEvent({
-      title: timerLogTitle.trim() || "Pomodoro Session",
+      title: timerLogTitle.trim() || t("calendar.pomodoroSession"),
       type: timerLogType,
       startTime: start.toISOString(),
       endTime: end.toISOString(),
       recurrence: "none",
-      description: "Logged from Focus Mode timer",
+      description: t("calendar.loggedFromFocusModeTimer"),
     });
     setLastCompletedFocusSeconds(null);
     setLastCompletedFocusAt(null);
@@ -2780,10 +4209,10 @@ function CalendarPage() {
         startHour: number;
         durationHours: number;
       }> = [
-        { title: "Algorithms Class", type: "class", weekdayOffset: 1, startHour: 10, durationHours: 1.5 },
-        { title: "Systems Class", type: "class", weekdayOffset: 3, startHour: 10, durationHours: 1.5 },
-        { title: "LeetCode Practice", type: "leetcode", weekdayOffset: 2, startHour: 19, durationHours: 1 },
-        { title: "Deep Study Block", type: "study", weekdayOffset: 5, startHour: 14, durationHours: 2 },
+        { title: t("calendar.templateAlgorithmsClass"), type: "class", weekdayOffset: 1, startHour: 10, durationHours: 1.5 },
+        { title: t("calendar.templateSystemsClass"), type: "class", weekdayOffset: 3, startHour: 10, durationHours: 1.5 },
+        { title: t("calendar.templateLeetCodePractice"), type: "leetcode", weekdayOffset: 2, startHour: 19, durationHours: 1 },
+        { title: t("calendar.templateDeepStudyBlock"), type: "study", weekdayOffset: 5, startHour: 14, durationHours: 2 },
       ];
       starterItems.forEach((item) => {
         const start = new Date(baseDate);
@@ -2800,15 +4229,15 @@ function CalendarPage() {
           endTime: end.toISOString(),
           recurrence: "weekly",
           recurrenceUntil: until.toISOString().slice(0, 10),
-          description: "Academic term template",
+          description: t("calendar.academicTermTemplate"),
         });
       });
       return;
     }
     const examPrep: Array<{ title: string; dayOffset: number; hour: number; durationHours: number }> = [
-      { title: "Exam Review Session", dayOffset: 0, hour: 18, durationHours: 2 },
-      { title: "Past Paper Practice", dayOffset: 2, hour: 17, durationHours: 2 },
-      { title: "Formula + Notes Consolidation", dayOffset: 4, hour: 19, durationHours: 1.5 },
+      { title: t("calendar.templateExamReviewSession"), dayOffset: 0, hour: 18, durationHours: 2 },
+      { title: t("calendar.templatePastPaperPractice"), dayOffset: 2, hour: 17, durationHours: 2 },
+      { title: t("calendar.templateFormulaNotesConsolidation"), dayOffset: 4, hour: 19, durationHours: 1.5 },
     ];
     examPrep.forEach((item) => {
       const start = new Date(baseDate);
@@ -2822,9 +4251,151 @@ function CalendarPage() {
         startTime: start.toISOString(),
         endTime: end.toISOString(),
         recurrence: "none",
-        description: "Exam week template",
+        description: t("calendar.examWeekTemplate"),
       });
     });
+  }
+
+  async function runCalendarAi(mode: "briefing" | "schedule" | "plan") {
+    if (!settings.aiEnabled) {
+      setAiCalendarOutput(t("ai.messages.enableFirst"));
+      return;
+    }
+    if (!settings.aiFeatureCalendarPlanner) {
+      setAiCalendarOutput(t("ai.messages.calendarPlannerDisabled"));
+      return;
+    }
+    if (!settings.aiPrivacyAcknowledged) {
+      setAiCalendarOutput(t("ai.messages.acknowledgePrivacy"));
+      return;
+    }
+    if (settings.aiProvider === "byok" && !settings.aiApiKey.trim()) {
+      setAiCalendarOutput(t("ai.messages.byokMissing"));
+      return;
+    }
+    const quota = consumeAiQuota(settings.aiProvider);
+    if (!quota.ok) {
+      setAiCalendarOutput(t("ai.messages.freeTierReached"));
+      return;
+    }
+
+    const nextEvents = visibleEvents
+      .slice(0, 8)
+      .map((event) => `${new Date(event.startTime).toLocaleString()} ${event.title}`)
+      .join(" | ");
+    const focusBaseDate = focusDate || new Date().toISOString().slice(0, 10);
+    const promptMap = {
+      briefing: `Generate a concise daily briefing using these events: ${nextEvents}. Include priority order and likely risks.`,
+      schedule: `Optimize my schedule to balance deep work and review sessions. Events snapshot: ${nextEvents}.`,
+      plan: `[CAL_PLAN] ${focusBaseDate}::Generate a 3-day study plan based on due reviews (${reviewDueProblemsCount} LeetCode, ${reviewDueKnowledgeCount} reading) and current events: ${nextEvents}. Return plan lines as PLAN_ITEM|title|YYYY-MM-DD|HH:mm|durationMinutes|type`,
+    } as const;
+    const safePrompt = sanitizeAiPrompt(promptMap[mode]);
+    if (!safePrompt) {
+      setAiCalendarOutput(t("ai.messages.invalidPrompt"));
+      return;
+    }
+
+    setAiCalendarLoading(true);
+    setAiCalendarOutput("");
+    if (mode === "plan") {
+      setCalendarPlanDrafts([]);
+    }
+    try {
+      let fullText = "";
+      for await (const chunk of streamAiResponseLazy({
+        prompt: safePrompt,
+        moduleName: "Calendar",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        apiKey: settings.aiApiKey,
+        context: {
+          eventsCount: events.length,
+          problemsCount: problems.length,
+          knowledgePointsCount: knowledgePoints.length,
+        },
+      })) {
+        fullText += chunk;
+        setAiCalendarOutput(fullText);
+      }
+      if (mode === "plan") {
+        const parsed = parseCalendarPlanDrafts(fullText);
+        setCalendarPlanDrafts(parsed);
+        if (parsed.length === 0) {
+          setAiCalendarOutput(
+            t("calendar.noStructuredPlanLines")
+          );
+        }
+      }
+    } finally {
+      setAiCalendarLoading(false);
+    }
+  }
+
+  function parseCalendarPlanDrafts(text: string): CalendarPlanDraft[] {
+    const allowedTypes: EventType[] = [
+      "class",
+      "study",
+      "leetcode",
+      "deadline",
+      "meeting",
+      "personal",
+      "custom",
+    ];
+    return text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("PLAN_ITEM|"))
+      .map((line) => {
+        const [, titleRaw, dateRaw, timeRaw, durationRaw, typeRaw] = line.split("|");
+        const title = (titleRaw ?? "").trim();
+        const date = /^\d{4}-\d{2}-\d{2}$/.test((dateRaw ?? "").trim())
+          ? (dateRaw ?? "").trim()
+          : new Date().toISOString().slice(0, 10);
+        const time = /^([01]\d|2[0-3]):[0-5]\d$/.test((timeRaw ?? "").trim())
+          ? (timeRaw ?? "").trim()
+          : "19:00";
+        const durationMinutes = Math.min(
+          240,
+          Math.max(15, Number.parseInt((durationRaw ?? "").trim(), 10) || 60)
+        );
+        const eventType = allowedTypes.includes((typeRaw ?? "").trim() as EventType)
+          ? ((typeRaw ?? "").trim() as EventType)
+          : "study";
+        return {
+          id: crypto.randomUUID(),
+          selected: true,
+          title: title || t("calendar.aiStudyBlock"),
+          date,
+          time,
+          durationMinutes,
+          type: eventType,
+        };
+      });
+  }
+
+  function insertSelectedPlanDrafts() {
+    const selectedDrafts = calendarPlanDrafts.filter((item) => item.selected);
+    if (selectedDrafts.length === 0) {
+      setAiCalendarOutput(t("calendar.selectAtLeastOneDraft"));
+      return;
+    }
+    let inserted = 0;
+    for (const draft of selectedDrafts) {
+      const start = new Date(`${draft.date}T${draft.time}:00`);
+      if (Number.isNaN(start.getTime())) continue;
+      const end = new Date(start);
+      end.setMinutes(end.getMinutes() + Math.max(15, draft.durationMinutes));
+      upsertEvent({
+        title: draft.title.trim() || t("calendar.aiStudyBlock"),
+        type: draft.type,
+        startTime: start.toISOString(),
+        endTime: end.toISOString(),
+        recurrence: "none",
+        description: t("calendar.insertedFromPlanDraft"),
+      });
+      inserted += 1;
+    }
+    setAiCalendarOutput(t("calendar.insertedDraftBlocks", { count: inserted }));
   }
 
   function slotIndexToIso(slotIndex: number): string {
@@ -2878,26 +4449,26 @@ function CalendarPage() {
 
   return (
     <PageCard
-      title="Calendar"
-      subtitle="Plan classes, study blocks, LeetCode sessions, and deadlines."
+      title={t("pages.calendar.title")}
+      subtitle={t("pages.calendar.subtitle")}
     >
       <div className="actions-row">
         <button type="button" onClick={() => setShowEventForm((prev) => !prev)}>
-          {showEventForm ? "Hide Event Form" : "Add Event"}
+          {showEventForm ? t("calendar.hideEventForm") : t("calendar.addEvent")}
         </button>
         <button
           type="button"
           className="button-secondary"
           onClick={() => applyAcademicTemplate("cs-starter")}
         >
-          Apply CS Term Template
+          {t("calendar.applyCsTermTemplate")}
         </button>
         <button
           type="button"
           className="button-secondary"
           onClick={() => applyAcademicTemplate("exam-week")}
         >
-          Apply Exam Week Template
+          {t("calendar.applyExamWeekTemplate")}
         </button>
         <div className="view-switch">
           {(["day", "week", "month", "agenda"] as const).map((mode) => (
@@ -2907,7 +4478,7 @@ function CalendarPage() {
               className={mode === viewMode ? "button-secondary view-active" : "button-secondary"}
               onClick={() => setViewMode(mode)}
             >
-              {mode[0].toUpperCase() + mode.slice(1)}
+              {getViewModeLabel(mode)}
             </button>
           ))}
         </div>
@@ -2915,81 +4486,83 @@ function CalendarPage() {
 
       <div className="calendar-nav">
         <button type="button" onClick={() => shiftFocus(-1)}>
-          Prev
+          {t("calendar.prev")}
         </button>
         <strong>{new Date(`${focusDate}T00:00:00`).toLocaleDateString()}</strong>
         <button type="button" onClick={() => shiftFocus(1)}>
-          Next
+          {t("calendar.next")}
         </button>
         <button type="button" className="button-secondary" onClick={() => setFocusDate(new Date().toISOString().slice(0, 10))}>
-          Today
+          {t("calendar.today")}
         </button>
       </div>
 
       {isMobileCalendar && (
         <div className="calendar-mobile-switch">
-          <small>Mobile quick views</small>
+          <small>{t("calendar.mobileQuickViews")}</small>
           <div className="actions-row">
             <button
               type="button"
               className={viewMode === "day" ? "button-secondary view-active" : "button-secondary"}
               onClick={() => setViewMode("day")}
             >
-              Day
+              {t("calendar.day")}
             </button>
             <button
               type="button"
               className={viewMode === "agenda" ? "button-secondary view-active" : "button-secondary"}
               onClick={() => setViewMode("agenda")}
             >
-              Agenda
+              {t("calendar.agenda")}
             </button>
           </div>
         </div>
       )}
 
       <article className="tile focus-mode-tile">
-        <h2>Focus Mode</h2>
-        <small>{completedFocusSessions} focus session(s) completed today</small>
+        <h2>{t("calendar.focusMode")}</h2>
+        <small>{t("calendar.focusSessionsCompletedToday", { count: completedFocusSessions })}</small>
         <div className="timer-presets">
           <button
             type="button"
             className={timerMode === "focus" ? "button-secondary view-active" : "button-secondary"}
             onClick={() => resetTimerForMode("focus")}
           >
-            Focus 25m
+            {t("calendar.focus25m")}
           </button>
           <button
             type="button"
             className={timerMode === "shortBreak" ? "button-secondary view-active" : "button-secondary"}
             onClick={() => resetTimerForMode("shortBreak")}
           >
-            Short Break
+            {t("calendar.shortBreak")}
           </button>
           <button
             type="button"
             className={timerMode === "longBreak" ? "button-secondary view-active" : "button-secondary"}
             onClick={() => resetTimerForMode("longBreak")}
           >
-            Long Break
+            {t("calendar.longBreak")}
           </button>
         </div>
         <div className="timer-display">{formatTimer(timerSecondsRemaining)}</div>
         <div className="actions-row">
           <button type="button" onClick={() => setTimerRunning((v) => !v)}>
-            {timerRunning ? "Pause" : "Start"}
+            {timerRunning ? t("common.pause") : t("common.start")}
           </button>
           <button type="button" className="button-secondary" onClick={() => resetTimerForMode(timerMode)}>
-            Reset
+            {t("common.reset")}
           </button>
         </div>
         {lastCompletedFocusSeconds && lastCompletedFocusAt && (
           <div className="timer-log-box">
             <small>
-              Last completed focus: {Math.round(lastCompletedFocusSeconds / 60)} minutes at{" "}
-              {new Date(lastCompletedFocusAt).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
+              {t("calendar.lastCompletedFocus", {
+                minutes: Math.round(lastCompletedFocusSeconds / 60),
+                at: new Date(lastCompletedFocusAt).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
               })}
             </small>
             <div className="filters-row timer-log-row">
@@ -2997,18 +4570,18 @@ function CalendarPage() {
                 value={timerLogType}
                 onChange={(e) => setTimerLogType(e.target.value as "study" | "leetcode")}
               >
-                <option value="study">Study</option>
-                <option value="leetcode">LeetCode</option>
+                <option value="study">{t("calendar.eventTypeStudy")}</option>
+                <option value="leetcode">{t("calendar.eventTypeLeetCode")}</option>
               </select>
               <input
                 value={timerLogTitle}
                 onChange={(e) => setTimerLogTitle(e.target.value)}
-                placeholder="Session title"
+                placeholder={t("calendar.sessionTitlePlaceholder")}
               />
             </div>
             <div className="actions-row">
               <button type="button" onClick={logCompletedPomodoro}>
-                Save Session To Calendar
+                {t("calendar.saveSessionToCalendar")}
               </button>
             </div>
           </div>
@@ -3016,16 +4589,16 @@ function CalendarPage() {
       </article>
 
       <article className="tile reminder-preview-tile">
-        <h2>Upcoming Reminder Preview</h2>
-        <small>Next 24 hours based on your current settings.</small>
+        <h2>{t("calendar.upcomingReminderPreview")}</h2>
+        <small>{t("calendar.next24Hours")}</small>
         {!settings.notificationsEnabled && (
-          <p>Notifications are disabled in Settings.</p>
+          <p>{t("calendar.notificationsDisabled")}</p>
         )}
         {settings.notificationsEnabled && !settings.eventRemindersEnabled && (
-          <p>Event reminders are disabled in Settings.</p>
+          <p>{t("calendar.eventRemindersDisabled")}</p>
         )}
         {settings.notificationsEnabled && settings.eventRemindersEnabled && reminderPreview.length === 0 && (
-          <p>No upcoming reminders in the next 24 hours.</p>
+          <p>{t("calendar.noUpcomingReminders")}</p>
         )}
         {settings.notificationsEnabled && settings.eventRemindersEnabled && reminderPreview.length > 0 && (
           <ul className="reminder-preview-list">
@@ -3033,11 +4606,13 @@ function CalendarPage() {
               <li key={`${item.event.occurrenceId}-${item.reminderAt.toISOString()}`}>
                 <strong>{item.event.title}</strong>
                 <small>
-                  Notify at {item.reminderAt.toLocaleString()} • Event starts{" "}
-                  {new Date(item.event.startTime).toLocaleString()}
+                  {t("calendar.notifyAt", {
+                    notifyAt: item.reminderAt.toLocaleString(),
+                    eventStarts: new Date(item.event.startTime).toLocaleString(),
+                  })}
                 </small>
                 {item.suppressedByQuietHours && (
-                  <small>Suppressed by quiet hours</small>
+                  <small>{t("calendar.suppressedByQuietHours")}</small>
                 )}
               </li>
             ))}
@@ -3045,27 +4620,187 @@ function CalendarPage() {
         )}
       </article>
 
+      <article className="tile leetcode-ai-panel">
+        <h2>{t("calendar.aiTitle")}</h2>
+        <p>{t("calendar.aiDesc")}</p>
+        <div className="actions-row">
+          <button
+            type="button"
+            className="button-secondary"
+            disabled={aiCalendarLoading}
+            onClick={() => void runCalendarAi("briefing")}
+          >
+            {t("calendar.generateDailyBriefing")}
+          </button>
+          <button
+            type="button"
+            className="button-secondary"
+            disabled={aiCalendarLoading}
+            onClick={() => void runCalendarAi("schedule")}
+          >
+            {t("calendar.smartScheduleSuggestion")}
+          </button>
+          <button
+            type="button"
+            className="button-secondary"
+            disabled={aiCalendarLoading}
+            onClick={() => void runCalendarAi("plan")}
+          >
+            {t("calendar.generateStudyPlan")}
+          </button>
+          <button
+            type="button"
+            className="button-secondary"
+            disabled={aiCalendarLoading || calendarPlanDrafts.length === 0}
+            onClick={insertSelectedPlanDrafts}
+          >
+            {t("calendar.insertSelectedDrafts")}
+          </button>
+        </div>
+        <div className="ai-inline-output">
+          {aiCalendarLoading && <small>{t("calendar.generatingResponse")}</small>}
+          {!aiCalendarLoading && !aiCalendarOutput && (
+            <small>{t("calendar.aiRunPrompt")}</small>
+          )}
+          {aiCalendarOutput && <pre>{aiCalendarOutput}</pre>}
+        </div>
+        {calendarPlanDrafts.length > 0 && (
+          <div className="ai-inline-output">
+            <small>{t("calendar.editPlanDraftsBeforeInserting")}</small>
+            {calendarPlanDrafts.map((draft) => (
+              <div key={draft.id} className="problem-form">
+                <div className="problem-form-grid">
+                  <label>
+                    <span>{t("calendar.include")}</span>
+                    <input
+                      type="checkbox"
+                      checked={draft.selected}
+                      onChange={(event) =>
+                        setCalendarPlanDrafts((current) =>
+                          current.map((item) =>
+                            item.id === draft.id ? { ...item, selected: event.target.checked } : item
+                          )
+                        )
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>{t("calendar.title")}</span>
+                    <input
+                      value={draft.title}
+                      onChange={(event) =>
+                        setCalendarPlanDrafts((current) =>
+                          current.map((item) =>
+                            item.id === draft.id ? { ...item, title: event.target.value } : item
+                          )
+                        )
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>{t("calendar.date")}</span>
+                    <input
+                      type="date"
+                      value={draft.date}
+                      onChange={(event) =>
+                        setCalendarPlanDrafts((current) =>
+                          current.map((item) =>
+                            item.id === draft.id ? { ...item, date: event.target.value } : item
+                          )
+                        )
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>{t("calendar.time")}</span>
+                    <input
+                      type="time"
+                      value={draft.time}
+                      onChange={(event) =>
+                        setCalendarPlanDrafts((current) =>
+                          current.map((item) =>
+                            item.id === draft.id ? { ...item, time: event.target.value } : item
+                          )
+                        )
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>{t("calendar.durationMin")}</span>
+                    <input
+                      type="number"
+                      min={15}
+                      max={240}
+                      step={15}
+                      value={draft.durationMinutes}
+                      onChange={(event) =>
+                        setCalendarPlanDrafts((current) =>
+                          current.map((item) =>
+                            item.id === draft.id
+                              ? {
+                                  ...item,
+                                  durationMinutes: Math.max(
+                                    15,
+                                    Math.min(240, Number(event.target.value) || 60)
+                                  ),
+                                }
+                              : item
+                          )
+                        )
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>{t("calendar.type")}</span>
+                    <select
+                      value={draft.type}
+                      onChange={(event) =>
+                        setCalendarPlanDrafts((current) =>
+                          current.map((item) =>
+                            item.id === draft.id
+                              ? { ...item, type: event.target.value as EventType }
+                              : item
+                          )
+                        )
+                      }
+                    >
+                      <option value="class">{t("calendar.eventTypeClass")}</option>
+                      <option value="study">{t("calendar.eventTypeStudy")}</option>
+                      <option value="leetcode">{t("calendar.eventTypeLeetCode")}</option>
+                      <option value="deadline">{t("calendar.eventTypeDeadline")}</option>
+                      <option value="meeting">{t("calendar.eventTypeMeeting")}</option>
+                      <option value="personal">{t("calendar.eventTypePersonal")}</option>
+                      <option value="custom">{t("calendar.eventTypeCustom")}</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </article>
+
       {showEventForm && (
         <form className="problem-form" onSubmit={onSaveEvent}>
           <div className="problem-form-grid">
             <label>
-              <span>Title</span>
+              <span>{t("calendar.title")}</span>
               <input value={eventTitle} onChange={(e) => setEventTitle(e.target.value)} required />
             </label>
             <label>
-              <span>Type</span>
+              <span>{t("calendar.type")}</span>
               <select value={eventType} onChange={(e) => setEventType(e.target.value as EventType)}>
-                <option value="class">Class</option>
-                <option value="study">Study</option>
-                <option value="leetcode">LeetCode</option>
-                <option value="deadline">Deadline</option>
-                <option value="meeting">Meeting</option>
-                <option value="personal">Personal</option>
-                <option value="custom">Custom</option>
+                <option value="class">{t("calendar.eventTypeClass")}</option>
+                <option value="study">{t("calendar.eventTypeStudy")}</option>
+                <option value="leetcode">{t("calendar.eventTypeLeetCode")}</option>
+                <option value="deadline">{t("calendar.eventTypeDeadline")}</option>
+                <option value="meeting">{t("calendar.eventTypeMeeting")}</option>
+                <option value="personal">{t("calendar.eventTypePersonal")}</option>
+                <option value="custom">{t("calendar.eventTypeCustom")}</option>
               </select>
             </label>
             <label>
-              <span>Start</span>
+              <span>{t("calendar.start")}</span>
               <input
                 type="datetime-local"
                 value={eventStart}
@@ -3074,7 +4809,7 @@ function CalendarPage() {
               />
             </label>
             <label>
-              <span>End</span>
+              <span>{t("calendar.end")}</span>
               <input
                 type="datetime-local"
                 value={eventEnd}
@@ -3083,21 +4818,21 @@ function CalendarPage() {
               />
             </label>
             <label>
-              <span>Recurrence</span>
+              <span>{t("calendar.recurrence")}</span>
               <select
                 value={eventRecurrence}
                 onChange={(e) =>
                   setEventRecurrence(e.target.value as "none" | "daily" | "weekly" | "monthly")
                 }
               >
-                <option value="none">No recurrence</option>
-                <option value="daily">Daily</option>
-                <option value="weekly">Weekly</option>
-                <option value="monthly">Monthly</option>
+                <option value="none">{t("calendar.noRecurrence")}</option>
+                <option value="daily">{t("calendar.daily")}</option>
+                <option value="weekly">{t("calendar.weekly")}</option>
+                <option value="monthly">{t("calendar.monthly")}</option>
               </select>
             </label>
             <label>
-              <span>Repeat Until</span>
+              <span>{t("calendar.repeatUntil")}</span>
               <input
                 type="date"
                 value={eventRecurrenceUntil}
@@ -3106,7 +4841,7 @@ function CalendarPage() {
               />
             </label>
             <label>
-              <span>Reminder</span>
+              <span>{t("calendar.reminder")}</span>
               <select
                 value={eventReminderMinutesBefore}
                 onChange={(e) =>
@@ -3115,16 +4850,16 @@ function CalendarPage() {
                   )
                 }
               >
-                <option value="0">No reminder</option>
-                <option value="5">5 min before</option>
-                <option value="10">10 min before</option>
-                <option value="15">15 min before</option>
-                <option value="30">30 min before</option>
-                <option value="60">1 hour before</option>
+                <option value="0">{t("calendar.noReminder")}</option>
+                <option value="5">{t("calendar.reminder5")}</option>
+                <option value="10">{t("calendar.reminder10")}</option>
+                <option value="15">{t("calendar.reminder15")}</option>
+                <option value="30">{t("calendar.reminder30")}</option>
+                <option value="60">{t("calendar.reminder60")}</option>
               </select>
             </label>
             <label>
-              <span>Linked Module</span>
+              <span>{t("calendar.linkedModule")}</span>
               <select
                 value={eventLinkedModule}
                 onChange={(e) => {
@@ -3138,21 +4873,21 @@ function CalendarPage() {
                   setEventLinkedItemId("");
                 }}
               >
-                <option value="none">None</option>
-                <option value="leetcode">LeetCode</option>
-                <option value="reading">Reading</option>
-                <option value="notes">Notes</option>
-                <option value="groups">Groups</option>
+                <option value="none">{t("calendar.none")}</option>
+                <option value="leetcode">{t("modules.leetcode")}</option>
+                <option value="reading">{t("modules.reading")}</option>
+                <option value="notes">{t("modules.notes")}</option>
+                <option value="groups">{t("modules.groups")}</option>
               </select>
             </label>
             {eventLinkedModule === "leetcode" && (
               <label>
-                <span>Linked Problem</span>
+                <span>{t("calendar.linkedProblem")}</span>
                 <select
                   value={eventLinkedItemId}
                   onChange={(e) => setEventLinkedItemId(e.target.value)}
                 >
-                  <option value="">None</option>
+                  <option value="">{t("calendar.none")}</option>
                   {problems.slice(0, 200).map((problem) => (
                     <option key={problem.id} value={problem.id}>
                       #{problem.problemNumber} {problem.title}
@@ -3163,12 +4898,12 @@ function CalendarPage() {
             )}
             {eventLinkedModule === "reading" && (
               <label>
-                <span>Linked Book</span>
+                <span>{t("calendar.linkedBook")}</span>
                 <select
                   value={eventLinkedItemId}
                   onChange={(e) => setEventLinkedItemId(e.target.value)}
                 >
-                  <option value="">None</option>
+                  <option value="">{t("calendar.none")}</option>
                   {books.map((book) => (
                     <option key={book.id} value={book.id}>
                       {book.title}
@@ -3178,7 +4913,7 @@ function CalendarPage() {
               </label>
             )}
             <label className="full-width">
-              <span>Description</span>
+              <span>{t("calendar.description")}</span>
               <textarea
                 rows={3}
                 value={eventDescription}
@@ -3187,7 +4922,7 @@ function CalendarPage() {
             </label>
           </div>
           <div className="actions-row">
-            <button type="submit">{editingEventId ? "Update Event" : "Save Event"}</button>
+            <button type="submit">{editingEventId ? t("calendar.updateEvent") : t("calendar.saveEvent")}</button>
             <button
               type="button"
               className="button-secondary"
@@ -3196,20 +4931,20 @@ function CalendarPage() {
                 resetEventForm();
               }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
           </div>
         </form>
       )}
 
       <article className="tile calendar-events">
-        <h2>{viewMode[0].toUpperCase() + viewMode.slice(1)} View</h2>
+        <h2>{t("calendar.viewTitle", { mode: getViewModeLabel(viewMode) })}</h2>
         {viewMode === "day" && (
           <div className="calendar-day-planner">
-            <small>Drag across time slots to create an event quickly.</small>
+            <small>{t("calendar.dragToCreateEvent")}</small>
             {isMobileCalendar && (
               <div className="mobile-day-list">
-                {dayEvents.length === 0 && <small>No events for this day.</small>}
+                {dayEvents.length === 0 && <small>{t("calendar.noEventsForDay")}</small>}
                 {dayEvents.map((event) => (
                   <article key={`mobile-day-${event.occurrenceId}`} className="mobile-event-card">
                     <strong>{event.title}</strong>
@@ -3224,7 +4959,7 @@ function CalendarPage() {
                         minute: "2-digit",
                       })}
                     </small>
-                    <span className={`event-type event-type-${event.type}`}>{event.type}</span>
+                    <span className={`event-type event-type-${event.type}`}>{getEventTypeLabel(event.type)}</span>
                   </article>
                 ))}
                 <button
@@ -3232,7 +4967,7 @@ function CalendarPage() {
                   className="button-secondary"
                   onClick={() => setShowMobileDayGrid((prev) => !prev)}
                 >
-                  {showMobileDayGrid ? "Hide Time Grid" : "Show Time Grid"}
+                  {showMobileDayGrid ? t("calendar.hideTimeGrid") : t("calendar.showTimeGrid")}
                 </button>
               </div>
             )}
@@ -3265,7 +5000,7 @@ function CalendarPage() {
             )}
           </div>
         )}
-        {visibleEvents.length === 0 && <p>No events in this range.</p>}
+        {visibleEvents.length === 0 && <p>{t("calendar.noEventsInRange")}</p>}
         {groupedDates.map((dateKey) => (
           <div
             key={dateKey}
@@ -3276,7 +5011,7 @@ function CalendarPage() {
               {groupedEvents[dateKey].map((event) => (
                 <li key={event.id}>
                   <div className="event-main">
-                    <span className={`event-type event-type-${event.type}`}>{event.type}</span>
+                    <span className={`event-type event-type-${event.type}`}>{getEventTypeLabel(event.type)}</span>
                     <strong>{event.title}</strong>
                     <small>
                       {new Date(event.startTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} -{" "}
@@ -3284,16 +5019,18 @@ function CalendarPage() {
                     </small>
                     {(event.recurrence ?? "none") !== "none" && (
                       <small>
-                        Repeats {event.recurrence}
-                        {event.recurrenceUntil ? ` until ${event.recurrenceUntil}` : ""}
+                        {t("calendar.repeats", { recurrence: event.recurrence })}
+                        {event.recurrenceUntil ? t("calendar.until", { date: event.recurrenceUntil }) : ""}
                       </small>
                     )}
                     {typeof event.reminderMinutesBefore === "number" && (
-                      <small>Reminder: {event.reminderMinutesBefore} min before</small>
+                      <small>{t("calendar.reminderMinutesBefore", { minutes: event.reminderMinutesBefore })}</small>
                     )}
                     {event.linkedModule && (
                       <small>
-                        Linked: {event.linkedModule}
+                        {t("calendar.linked", {
+                          module: getLinkedModuleLabel(event.linkedModule),
+                        })}
                         {event.linkedItemId ? ` (${event.linkedItemId.slice(0, 8)})` : ""}
                       </small>
                     )}
@@ -3301,23 +5038,23 @@ function CalendarPage() {
                   </div>
                   <div className="inline-actions">
                     <button type="button" onClick={() => onEditEvent(events.find((item) => item.id === event.sourceEventId) ?? event)}>
-                      Edit
+                      {t("common.edit")}
                     </button>
                     <button
                       type="button"
                       className="button-secondary event-resize-handle"
-                      title="Drag vertically to resize event end time"
+                      title={t("calendar.resizeHint")}
                       disabled={event.isRecurringInstance}
                       onMouseDown={(mouseEvent) => startResizeDrag(mouseEvent, events.find((item) => item.id === event.sourceEventId) ?? event)}
                     >
-                      Resize
+                      {t("calendar.resize")}
                     </button>
                     <button
                       type="button"
                       className="button-danger"
                       onClick={() => deleteEvent(event.sourceEventId)}
                     >
-                      Delete
+                      {t("common.delete")}
                     </button>
                     {event.linkedModule && (
                       <button
@@ -3325,7 +5062,7 @@ function CalendarPage() {
                         className="button-secondary"
                         onClick={() => goToLinkedTarget(event)}
                       >
-                        Open Linked
+                        {t("calendar.openLinked")}
                       </button>
                     )}
                     {event.type === "leetcode" && (
@@ -3334,7 +5071,7 @@ function CalendarPage() {
                         className="button-secondary"
                         onClick={() => navigate("/leetcode")}
                       >
-                        Log Problem
+                        {t("calendar.logProblem")}
                       </button>
                     )}
                     {event.type === "study" && (
@@ -3343,7 +5080,7 @@ function CalendarPage() {
                         className="button-secondary"
                         onClick={() => navigate("/reading")}
                       >
-                        Capture Knowledge
+                        {t("calendar.captureKnowledge")}
                       </button>
                     )}
                   </div>
@@ -3358,6 +5095,18 @@ function CalendarPage() {
 }
 
 function NotesPage() {
+  const { t } = useTranslation();
+  type PasteAssistState = {
+    sourceText: string;
+    sourceFrom: number;
+    sourceTo: number;
+    format: "bullets" | "paragraph";
+    insertionMode: "replace" | "below";
+    loading: boolean;
+    output: string;
+  };
+
+  const settings = useAppStore((state) => state.settings);
   const notes = useAppStore((state) => state.notes);
   const problems = useAppStore((state) => state.problems);
   const books = useAppStore((state) => state.books);
@@ -3371,35 +5120,76 @@ function NotesPage() {
   const [title, setTitle] = useState("");
   const [template, setTemplate] = useState<NoteTemplate>("custom");
   const [content, setContent] = useState("");
+  const [pinned, setPinned] = useState(false);
   const [tagsInput, setTagsInput] = useState("");
   const [linkedModule, setLinkedModule] = useState<"none" | "leetcode" | "reading" | "calendar" | "groups">(
     "none"
   );
   const [linkedItemId, setLinkedItemId] = useState("");
+  const [pasteAssist, setPasteAssist] = useState<PasteAssistState | null>(null);
+  const imagePickerRef = useRef<HTMLInputElement | null>(null);
 
   const templateBodies: Record<NoteTemplate, { title: string; content: string }> = {
     custom: { title: "", content: "" },
     lecture: {
       title: "Lecture Notes",
       content:
-        "# Lecture\n\n## Key Ideas\n- \n\n## Examples\n- \n\n## Questions\n- \n\n## Next Actions\n- [[calendar]] Review and summarize",
+        "<h1>Lecture</h1><h2>Key Ideas</h2><ul><li></li></ul><h2>Examples</h2><ul><li></li></ul><h2>Questions</h2><ul><li></li></ul><h2>Next Actions</h2><p>[[calendar]] Review and summarize</p>",
     },
     algorithm: {
       title: "Algorithm Note",
       content:
-        "# Problem Context\n\n## Approach\n- \n\n## Complexity\n- Time: \n- Space: \n\n## Edge Cases\n- \n\n## Related\n- [[leetcode]]",
+        "<h1>Problem Context</h1><h2>Approach</h2><ul><li></li></ul><h2>Complexity</h2><ul><li>Time:</li><li>Space:</li></ul><h2>Edge Cases</h2><ul><li></li></ul><h2>Related</h2><p>[[leetcode]]</p>",
     },
     meeting: {
       title: "Meeting Notes",
       content:
-        "# Agenda\n- \n\n## Discussion\n- \n\n## Decisions\n- \n\n## Action Items\n- [ ] \n\n## Follow-up\n- [[groups]]",
+        "<h1>Agenda</h1><ul><li></li></ul><h2>Discussion</h2><ul><li></li></ul><h2>Decisions</h2><ul><li></li></ul><h2>Action Items</h2><ul><li>[ ]</li></ul><h2>Follow-up</h2><p>[[groups]]</p>",
     },
     weekly_reflection: {
       title: "Weekly Reflection",
       content:
-        "# Wins\n- \n\n# Challenges\n- \n\n# Learnings\n- \n\n# Focus Next Week\n- [[reading]]\n- [[leetcode]]",
+        "<h1>Wins</h1><ul><li></li></ul><h1>Challenges</h1><ul><li></li></ul><h1>Learnings</h1><ul><li></li></ul><h1>Focus Next Week</h1><ul><li>[[reading]]</li><li>[[leetcode]]</li></ul>",
     },
   };
+
+  function maybeOpenPasteAssist(pastedText: string, selectionFrom: number, insertedSize: number) {
+    if (!settings.aiEnabled) return;
+    if (!pastedText.trim()) return;
+    const pastedLines = pastedText.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
+    if (pastedText.length < 800 && pastedLines < 8) return;
+    setPasteAssist({
+      sourceText: pastedText,
+      sourceFrom: selectionFrom,
+      sourceTo: selectionFrom + insertedSize,
+      format: "bullets",
+      insertionMode: "below",
+      loading: false,
+      output: "",
+    });
+  }
+
+  const editor = useEditor({
+    extensions: [
+      StarterKit,
+      Placeholder.configure({
+        placeholder: "Write notes here...",
+      }),
+      Image,
+    ],
+    content,
+    editorProps: {
+      handlePaste: (view, event, slice) => {
+        const pastedText = event.clipboardData?.getData("text") ?? "";
+        const selectionFrom = view.state.selection.from;
+        maybeOpenPasteAssist(pastedText, selectionFrom, slice.content.size);
+        return false;
+      },
+    },
+    onUpdate: ({ editor: nextEditor }) => {
+      setContent(nextEditor.getHTML());
+    },
+  });
 
   useEffect(() => {
     if (!activeNoteId && notes.length > 0) {
@@ -3416,20 +5206,30 @@ function NotesPage() {
     setTitle(active.title);
     setTemplate(active.template);
     setContent(active.content);
+    setPinned(Boolean(active.pinned));
     setTagsInput(active.tags.join(", "));
     setLinkedModule(active.linkedModule ?? "none");
     setLinkedItemId(active.linkedItemId ?? "");
   }, [activeNoteId, notes]);
 
+  useEffect(() => {
+    if (!editor) return;
+    const currentHtml = editor.getHTML();
+    if (content === currentHtml) return;
+    editor.commands.setContent(content || "<p></p>", { emitUpdate: false });
+  }, [editor, content]);
+
   const filteredNotes = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return notes;
-    return notes.filter(
+    const filtered = !q
+      ? notes
+      : notes.filter(
       (note) =>
         note.title.toLowerCase().includes(q) ||
         note.content.toLowerCase().includes(q) ||
         note.tags.some((tag) => tag.toLowerCase().includes(q))
     );
+    return filtered.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
   }, [notes, search]);
 
   const wikilinks = useMemo(() => {
@@ -3504,6 +5304,7 @@ function NotesPage() {
     setTitle("");
     setTemplate("custom");
     setContent("");
+    setPinned(false);
     setTagsInput("");
     setLinkedModule("none");
     setLinkedItemId("");
@@ -3523,6 +5324,7 @@ function NotesPage() {
       title: title.trim(),
       template,
       content,
+      pinned,
       tags: tagsInput
         .split(",")
         .map((tag) => tag.trim())
@@ -3530,6 +5332,25 @@ function NotesPage() {
       linkedModule: linkedModule === "none" ? undefined : linkedModule,
       linkedItemId: linkedModule === "none" ? undefined : linkedItemId || undefined,
     });
+  }
+
+  function insertRichSnippet(text: string) {
+    if (!editor) return;
+    editor.chain().focus().insertContent(text).run();
+  }
+
+  async function onPickImage(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : "";
+      if (!dataUrl) return;
+      if (!editor) return;
+      editor.chain().focus().setImage({ src: dataUrl, alt: file.name }).run();
+    };
+    reader.readAsDataURL(file);
+    event.target.value = "";
   }
 
   function openResolvedWikilink(link: (typeof resolvedWikilinks)[number]) {
@@ -3541,6 +5362,95 @@ function NotesPage() {
       setActiveNoteId(link.noteId);
       return;
     }
+  }
+
+  async function generatePasteAssistSummary() {
+    if (!pasteAssist) return;
+    if (!settings.aiEnabled) {
+      setPasteAssist((current) =>
+        current ? { ...current, output: t("ai.messages.enableFirst") } : current
+      );
+      return;
+    }
+    if (!settings.aiPrivacyAcknowledged) {
+      setPasteAssist((current) =>
+        current
+          ? { ...current, output: t("ai.messages.acknowledgePrivacy") }
+          : current
+      );
+      return;
+    }
+    if (settings.aiProvider === "byok" && !settings.aiApiKey.trim()) {
+      setPasteAssist((current) =>
+        current ? { ...current, output: t("ai.messages.byokMissing") } : current
+      );
+      return;
+    }
+    const quota = consumeAiQuota(settings.aiProvider);
+    if (!quota.ok) {
+      setPasteAssist((current) =>
+        current ? { ...current, output: t("ai.messages.freeTierReached") } : current
+      );
+      return;
+    }
+
+    const basePrompt =
+      pasteAssist.format === "bullets"
+        ? "Summarize the pasted text into concise knowledge-point bullet points for a CS student. Keep it short and high signal."
+        : "Summarize the pasted text into a concise paragraph form for a CS student. Keep it short and high signal.";
+    const prompt = sanitizeAiPrompt(
+      `${basePrompt}\n\nSource text:\n${pasteAssist.sourceText.slice(0, 9000)}`
+    );
+    if (!prompt) {
+      setPasteAssist((current) =>
+        current ? { ...current, output: t("ai.messages.invalidPrompt") } : current
+      );
+      return;
+    }
+
+    setPasteAssist((current) => (current ? { ...current, loading: true, output: "" } : current));
+    try {
+      let full = "";
+      for await (const chunk of streamAiResponseLazy({
+        prompt,
+        moduleName: "Notes",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        apiKey: settings.aiApiKey,
+        context: {
+          notesCount: notes.length,
+        },
+      })) {
+        full += chunk;
+        setPasteAssist((current) => (current ? { ...current, output: full } : current));
+      }
+    } finally {
+      setPasteAssist((current) => (current ? { ...current, loading: false } : current));
+    }
+  }
+
+  function applyPasteAssistSummary() {
+    if (!editor || !pasteAssist || !pasteAssist.output.trim()) return;
+    const summaryText = pasteAssist.output.trim();
+    if (pasteAssist.insertionMode === "replace") {
+      editor
+        .chain()
+        .focus()
+        .setTextSelection({
+          from: Math.max(1, pasteAssist.sourceFrom),
+          to: Math.max(1, pasteAssist.sourceTo),
+        })
+        .insertContent(summaryText)
+        .run();
+    } else {
+      editor
+        .chain()
+        .focus()
+        .setTextSelection(Math.max(1, pasteAssist.sourceTo))
+        .insertContent(`\n\n${summaryText}`)
+        .run();
+    }
+    setPasteAssist(null);
   }
 
   function renderInline(text: string): ReactNode[] {
@@ -3693,6 +5603,18 @@ function NotesPage() {
         );
         continue;
       }
+      const imageMatch = line.match(/^!\[(.*?)\]\((.*?)\)$/);
+      if (imageMatch) {
+        flushParagraph();
+        flushList();
+        output.push(
+          <figure key={`img-${output.length}`} className="markdown-image-block">
+            <img src={imageMatch[2]} alt={imageMatch[1] || "note image"} />
+            {imageMatch[1] && <figcaption>{imageMatch[1]}</figcaption>}
+          </figure>
+        );
+        continue;
+      }
       if (line.startsWith("- ")) {
         flushParagraph();
         listItems.push(line.slice(2).trim());
@@ -3723,8 +5645,8 @@ function NotesPage() {
 
   return (
     <PageCard
-      title="Notes"
-      subtitle="Quick capture and structured notes for lectures and algorithms."
+      title={t("pages.notes.title")}
+      subtitle={t("pages.notes.subtitle")}
     >
       <div className="actions-row">
         <button type="button" onClick={resetDraft}>
@@ -3748,8 +5670,20 @@ function NotesPage() {
             {filteredNotes.map((note) => (
               <li key={note.id} className={note.id === activeNoteId ? "note-active" : ""}>
                 <button type="button" onClick={() => setActiveNoteId(note.id)}>
-                  <strong>{note.title}</strong>
+                  <strong>{note.pinned ? "📌 " : ""}{note.title}</strong>
                   <small>{new Date(note.updatedAt).toLocaleDateString()}</small>
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() =>
+                    upsertNote({
+                      ...note,
+                      pinned: !note.pinned,
+                    })
+                  }
+                >
+                  {note.pinned ? "Unpin" : "Pin"}
                 </button>
                 <button
                   type="button"
@@ -3862,20 +5796,147 @@ function NotesPage() {
               <span>Tags (comma-separated)</span>
               <input value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} />
             </label>
-            <label className="full-width">
-              <span>Content (Markdown + [[wikilink]])</span>
-              <textarea
-                rows={14}
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
+            <label>
+              <span>Pin to top</span>
+              <input
+                type="checkbox"
+                checked={pinned}
+                onChange={(event) => setPinned(event.target.checked)}
               />
+            </label>
+            <label className="full-width">
+              <span>Content (Rich Text + [[wikilink]])</span>
+              <div className="notes-toolbar">
+                <button
+                  type="button"
+                  onClick={() => editor?.chain().focus().toggleHeading({ level: 1 }).run()}
+                >
+                  H1
+                </button>
+                <button
+                  type="button"
+                  onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}
+                >
+                  H2
+                </button>
+                <button type="button" onClick={() => editor?.chain().focus().toggleBold().run()}>
+                  Bold
+                </button>
+                <button type="button" onClick={() => editor?.chain().focus().toggleCode().run()}>
+                  Inline Code
+                </button>
+                <button
+                  type="button"
+                  onClick={() => editor?.chain().focus().toggleCodeBlock().run()}
+                >
+                  Code Block
+                </button>
+                <button type="button" onClick={() => insertRichSnippet("$x^2 + y^2$")}>
+                  Inline Math
+                </button>
+                <button type="button" onClick={() => insertRichSnippet("\n$$\nE = mc^2\n$$\n")}>
+                  Math Block
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertRichSnippet("[[notes]]")}
+                >
+                  Wikilink
+                </button>
+                <button type="button" onClick={() => imagePickerRef.current?.click()}>
+                  Image
+                </button>
+                <input
+                  ref={imagePickerRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={onPickImage}
+                  style={{ display: "none" }}
+                />
+              </div>
+              <EditorContent editor={editor} className="tiptap-editor" />
+              {pasteAssist && (
+                <div className="notes-paste-assist">
+                  <small>Large paste detected. Generate a short AI summary?</small>
+                  <div className="notes-paste-assist-controls">
+                    <label>
+                      <span>Summary format</span>
+                      <select
+                        value={pasteAssist.format}
+                        onChange={(event) =>
+                          setPasteAssist((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  format: event.target.value as "bullets" | "paragraph",
+                                }
+                              : current
+                          )
+                        }
+                      >
+                        <option value="bullets">Bullet knowledge points</option>
+                        <option value="paragraph">Paragraph summary</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Apply mode</span>
+                      <select
+                        value={pasteAssist.insertionMode}
+                        onChange={(event) =>
+                          setPasteAssist((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  insertionMode: event.target.value as "replace" | "below",
+                                }
+                              : current
+                          )
+                        }
+                      >
+                        <option value="replace">Replace original pasted block</option>
+                        <option value="below">Insert summary below original block</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="actions-row">
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      disabled={pasteAssist.loading}
+                      onClick={() => void generatePasteAssistSummary()}
+                    >
+                      {pasteAssist.loading ? "Generating..." : "Generate Summary"}
+                    </button>
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      disabled={pasteAssist.loading || !pasteAssist.output.trim()}
+                      onClick={applyPasteAssistSummary}
+                    >
+                      Apply
+                    </button>
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      onClick={() => setPasteAssist(null)}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                  {pasteAssist.output && (
+                    <div className="notes-paste-assist-output">
+                      <pre>{pasteAssist.output}</pre>
+                    </div>
+                  )}
+                </div>
+              )}
             </label>
           </div>
         </article>
 
         <article className="tile notes-preview">
           <h2>Preview</h2>
-          <div className="markdown-preview">{renderMarkdownPreview(content)}</div>
+          <div className="markdown-preview notes-rich-preview">{renderMarkdownPreview(content)}</div>
           {resolvedWikilinks.length > 0 && (
             <div className="notes-wikilinks">
               <strong>Detected Wikilinks</strong>
@@ -3904,20 +5965,25 @@ function NotesPage() {
 }
 
 function GroupsPage() {
+  const { t } = useTranslation();
   return (
     <PageCard
-      title="Study Groups"
-      subtitle="Create optional shared spaces for classmates and project teammates."
+      title={t("pages.groups.title")}
+      subtitle={t("pages.groups.subtitle")}
     >
       <article className="tile">
         <h2>Group Setup</h2>
         <p>Create your first group and invite members.</p>
+        <div className="groups-placeholder">
+          <p>Shared notes, progress visibility, and group calendar tools will appear here.</p>
+        </div>
       </article>
     </PageCard>
   );
 }
 
 function SettingsPage() {
+  const { t } = useTranslation();
   const settings = useAppStore((state) => state.settings);
   const syncMetadata = useAppStore((state) => state.leetCodeSyncMetadata);
   const updateSettings = useAppStore((state) => state.updateSettings);
@@ -3946,12 +6012,12 @@ function SettingsPage() {
 
   return (
     <PageCard
-      title="Settings"
-      subtitle="Theme, notifications, AI controls, and LeetCode account linking."
+      title={t("pages.settings.title")}
+      subtitle={t("pages.settings.subtitle")}
     >
       <div className="settings-list">
         <label className="setting-row">
-          <span>Enable AI features</span>
+          <span>{t("settings.enableAi")}</span>
           <input
             type="checkbox"
             checked={settings.aiEnabled}
@@ -3961,7 +6027,111 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Enable notifications</span>
+          <span>{t("settings.aiProvider")}</span>
+          <select
+            value={settings.aiProvider}
+            disabled={!settings.aiEnabled}
+            onChange={(event) =>
+              updateSettings({
+                aiProvider: event.target.value as "free_default" | "byok",
+              })
+            }
+          >
+            <option value="free_default">{t("settings.providerFree")}</option>
+            <option value="byok">{t("settings.providerByok")}</option>
+          </select>
+        </label>
+        <label className="setting-row">
+          <span>{t("settings.aiModel")}</span>
+          <select
+            value={settings.aiModel}
+            disabled={!settings.aiEnabled}
+            onChange={(event) =>
+              updateSettings({
+                aiModel: event.target.value as "gemma-3" | "llama-4-scout" | "gpt-4.1-mini",
+              })
+            }
+          >
+            <option value="gemma-3">Gemma 3 (Free Default)</option>
+            <option value="llama-4-scout">Llama 4 Scout (Free Default)</option>
+            <option value="gpt-4.1-mini">GPT-4.1 mini (BYOK)</option>
+          </select>
+        </label>
+        <div className="setting-row">
+          <span>{t("settings.aiPrivacyDisclosure")}</span>
+          <div className="sync-box">
+            <small>
+              {t("settings.aiPrivacyDesc")}
+            </small>
+            <label>
+              <input
+                type="checkbox"
+                checked={settings.aiPrivacyAcknowledged}
+                onChange={(event) =>
+                  updateSettings({ aiPrivacyAcknowledged: event.target.checked })
+                }
+              />{" "}
+              {t("settings.aiConsent")}
+            </label>
+          </div>
+        </div>
+        <label className="setting-row">
+          <span>{t("settings.aiChatPanel")}</span>
+          <input
+            type="checkbox"
+            checked={settings.aiFeatureChat}
+            disabled={!settings.aiEnabled}
+            onChange={(event) =>
+              updateSettings({ aiFeatureChat: event.target.checked })
+            }
+          />
+        </label>
+        <label className="setting-row">
+          <span>{t("settings.leetcodeAiHints")}</span>
+          <input
+            type="checkbox"
+            checked={settings.aiFeatureLeetCodeHints}
+            disabled={!settings.aiEnabled}
+            onChange={(event) =>
+              updateSettings({ aiFeatureLeetCodeHints: event.target.checked })
+            }
+          />
+        </label>
+        <label className="setting-row">
+          <span>{t("settings.readingAiExplainer")}</span>
+          <input
+            type="checkbox"
+            checked={settings.aiFeatureReadingExplainer}
+            disabled={!settings.aiEnabled}
+            onChange={(event) =>
+              updateSettings({ aiFeatureReadingExplainer: event.target.checked })
+            }
+          />
+        </label>
+        <label className="setting-row">
+          <span>{t("settings.calendarAiPlanner")}</span>
+          <input
+            type="checkbox"
+            checked={settings.aiFeatureCalendarPlanner}
+            disabled={!settings.aiEnabled}
+            onChange={(event) =>
+              updateSettings({ aiFeatureCalendarPlanner: event.target.checked })
+            }
+          />
+        </label>
+        <label className="setting-row">
+          <span>{t("settings.aiFlashcardGenerator")}</span>
+          <input
+            type="checkbox"
+            checked={settings.aiFeatureFlashcardGenerator}
+            disabled={!settings.aiEnabled}
+            onChange={(event) =>
+              updateSettings({ aiFeatureFlashcardGenerator: event.target.checked })
+            }
+          />
+        </label>
+        <label className="setting-row">
+          <span>{t("settings.enableNotifications")}</span>
           <div className="sync-box">
             <input
               type="checkbox"
@@ -3971,7 +6141,7 @@ function SettingsPage() {
               }
             />
             <small>
-              Browser permission: {notificationPermission}
+              {t("settings.browserPermission", { value: notificationPermission })}
             </small>
             <button
               type="button"
@@ -3979,12 +6149,12 @@ function SettingsPage() {
               onClick={() => void requestNotificationPermission()}
               disabled={notificationPermission === "granted" || notificationPermission === "unsupported"}
             >
-              Request Browser Permission
+              {t("settings.requestBrowserPermission")}
             </button>
           </div>
         </label>
         <label className="setting-row">
-          <span>Daily digest</span>
+          <span>{t("settings.dailyDigest")}</span>
           <input
             type="checkbox"
             checked={settings.dailyDigestEnabled}
@@ -3995,7 +6165,7 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Daily digest time</span>
+          <span>{t("settings.dailyDigestTime")}</span>
           <input
             type="time"
             value={settings.dailyDigestTime}
@@ -4006,7 +6176,7 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Event reminders</span>
+          <span>{t("settings.eventReminders")}</span>
           <input
             type="checkbox"
             checked={settings.eventRemindersEnabled}
@@ -4017,7 +6187,7 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Review reminders</span>
+          <span>{t("settings.reviewReminders")}</span>
           <input
             type="checkbox"
             checked={settings.reviewRemindersEnabled}
@@ -4028,7 +6198,7 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Review reminder time</span>
+          <span>{t("settings.reviewReminderTime")}</span>
           <input
             type="time"
             value={settings.reviewReminderTime}
@@ -4039,7 +6209,7 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Streak reminders</span>
+          <span>{t("settings.streakReminders")}</span>
           <input
             type="checkbox"
             checked={settings.streakRemindersEnabled}
@@ -4050,7 +6220,7 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Streak reminder time</span>
+          <span>{t("settings.streakReminderTime")}</span>
           <input
             type="time"
             value={settings.streakReminderTime}
@@ -4061,7 +6231,7 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Quiet hours</span>
+          <span>{t("settings.quietHours")}</span>
           <input
             type="checkbox"
             checked={settings.quietHoursEnabled}
@@ -4072,7 +6242,7 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Quiet hours start</span>
+          <span>{t("settings.quietHoursStart")}</span>
           <input
             type="time"
             value={settings.quietHoursStart}
@@ -4083,7 +6253,7 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Quiet hours end</span>
+          <span>{t("settings.quietHoursEnd")}</span>
           <input
             type="time"
             value={settings.quietHoursEnd}
@@ -4094,17 +6264,17 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>Theme</span>
+          <span>{t("settings.theme")}</span>
           <select
             value={settings.themePreference}
             onChange={(event) => onThemeChange(event.target.value as ThemePreference)}
           >
-            <option value="dark">Dark</option>
-            <option value="light">Light</option>
+            <option value="dark">{t("settings.themeDark")}</option>
+            <option value="light">{t("settings.themeLight")}</option>
           </select>
         </label>
         <label className="setting-row">
-          <span>Accent color</span>
+          <span>{t("settings.accentColor")}</span>
           <div className="accent-picker-row">
             <input
               type="color"
@@ -4126,10 +6296,10 @@ function SettingsPage() {
           </div>
         </label>
         <label className="setting-row">
-          <span>LeetCode Username</span>
+          <span>{t("settings.leetcodeUsername")}</span>
           <input
             type="text"
-            placeholder="e.g. your_handle"
+            placeholder={t("settings.leetcodeUsernamePlaceholder")}
             value={settings.leetCodeUsername}
             onChange={(event) =>
               updateSettings({ leetCodeUsername: event.target.value })
@@ -4137,7 +6307,7 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
-          <span>LeetCode Goal</span>
+          <span>{t("settings.leetcodeGoal")}</span>
           <input
             type="number"
             min={1}
@@ -4148,47 +6318,48 @@ function SettingsPage() {
           />
         </label>
         <div className="setting-row">
-          <span>LeetCode Sync</span>
+          <span>{t("settings.leetcodeSync")}</span>
           <div className="sync-box">
             <small>
               {syncMetadata.status} via {syncMetadata.method}
             </small>
             <small>
-              Last sync:{" "}
+              {t("settings.lastSync")}{" "}
               {syncMetadata.lastSyncAt
                 ? new Date(syncMetadata.lastSyncAt).toLocaleString()
                 : "Never"}
             </small>
             {typeof syncMetadata.lastImportedCount === "number" && (
-              <small>Imported this run: {syncMetadata.lastImportedCount}</small>
+              <small>{t("settings.importedThisRun", { count: syncMetadata.lastImportedCount })}</small>
             )}
             {typeof syncMetadata.lastCreatedCount === "number" && (
-              <small>Created: {syncMetadata.lastCreatedCount}</small>
+              <small>{t("settings.createdCount", { count: syncMetadata.lastCreatedCount })}</small>
             )}
             {typeof syncMetadata.lastMergedCount === "number" && (
-              <small>Merged: {syncMetadata.lastMergedCount}</small>
+              <small>{t("settings.mergedCount", { count: syncMetadata.lastMergedCount })}</small>
             )}
             {typeof syncMetadata.scrapeSolvedCount === "number" && (
-              <small>Scrape solved count: {syncMetadata.scrapeSolvedCount}</small>
+              <small>{t("settings.scrapeSolvedCount", { count: syncMetadata.scrapeSolvedCount })}</small>
             )}
             {syncMetadata.lastAttemptMethods.length > 0 && (
-              <small>Attempt chain: {syncMetadata.lastAttemptMethods.join(" -> ")}</small>
+              <small>{t("settings.attemptChain", { chain: syncMetadata.lastAttemptMethods.join(" -> ") })}</small>
             )}
             <button
               type="button"
               disabled={syncMetadata.status === "syncing"}
               onClick={() => void runLeetCodeSync()}
             >
-              Sync Now
+              {t("leetcode.syncNow")}
             </button>
           </div>
         </div>
         <label className="setting-row">
-          <span>AI API Key (optional)</span>
+          <span>{t("settings.aiApiKeyOptional")}</span>
           <input
             type="password"
             placeholder="sk-..."
             value={settings.aiApiKey}
+            disabled={!settings.aiEnabled || settings.aiProvider !== "byok"}
             onChange={(event) => updateSettings({ aiApiKey: event.target.value })}
           />
         </label>
@@ -4198,26 +6369,31 @@ function SettingsPage() {
 }
 
 function NotFoundPage() {
+  const { t } = useTranslation();
   return (
     <PageCard
-      title="Page Not Found"
-      subtitle="This route does not exist yet."
+      title={t("pages.notFound.title")}
+      subtitle={t("pages.notFound.subtitle")}
     />
   );
 }
 
 export default function App() {
   const { t } = useTranslation();
+  const location = useLocation();
   const navigate = useNavigate();
   const hydrated = useAppStore((state) => state.hydrated);
   const hydrate = useAppStore((state) => state.hydrate);
   const settings = useAppStore((state) => state.settings);
   const events = useAppStore((state) => state.events);
   const notes = useAppStore((state) => state.notes);
+  const upsertNote = useAppStore((state) => state.upsertNote);
   const books = useAppStore((state) => state.books);
   const groups = useAppStore((state) => state.groups);
   const problems = useAppStore((state) => state.problems);
   const knowledgePoints = useAppStore((state) => state.knowledgePoints);
+  const runLeetCodeSync = useAppStore((state) => state.runLeetCodeSync);
+  const syncMetadata = useAppStore((state) => state.leetCodeSyncMetadata);
   const themePreference = useAppStore((state) => state.settings.themePreference);
   const accentColor = useAppStore((state) => state.settings.accentColor);
   const notifiedReminderIdsRef = useRef<Set<string>>(new Set());
@@ -4225,10 +6401,42 @@ export default function App() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [topbarSearchOpen, setTopbarSearchOpen] = useState(false);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
+  const [quickCaptureOpen, setQuickCaptureOpen] = useState(false);
+  const [quickCaptureTitle, setQuickCaptureTitle] = useState("");
+  const [quickCaptureContent, setQuickCaptureContent] = useState("");
+  const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  const [aiInput, setAiInput] = useState("");
+  const [aiThinking, setAiThinking] = useState(false);
+  const [aiMessages, setAiMessages] = useState<AiChatMessage[]>([]);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [session, setSession] = useState<Session | null>(null);
 
   useEffect(() => {
     void hydrate();
   }, [hydrate]);
+
+  useEffect(() => {
+    if (!isAuthConfigured) {
+      setAuthLoading(false);
+      return;
+    }
+    let active = true;
+    void getCurrentSession()
+      .then((current) => {
+        if (!active) return;
+        setSession(current);
+      })
+      .finally(() => {
+        if (active) setAuthLoading(false);
+      });
+    const unsubscribe = subscribeAuthState((nextSession) => {
+      setSession(nextSession);
+    });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, []);
 
   useEffect(() => {
     document.body.dataset.theme = themePreference;
@@ -4237,6 +6445,56 @@ export default function App() {
   useEffect(() => {
     document.documentElement.style.setProperty("--accent", accentColor || "#58a6ff");
   }, [accentColor]);
+
+  useEffect(() => {
+    const raw = localStorage.getItem("notebook-ai-chat-history-v1");
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as AiChatMessage[];
+      if (Array.isArray(parsed)) {
+        setAiMessages(parsed.slice(-60));
+      }
+    } catch {
+      // ignore invalid cache
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("notebook-ai-chat-history-v1", JSON.stringify(aiMessages.slice(-60)));
+  }, [aiMessages]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!settings.leetCodeUsername.trim()) return;
+
+    let syncing = false;
+    async function tryAutoSync() {
+      if (syncing) return;
+      if (syncMetadata.status === "syncing") return;
+      const lastSyncMs = syncMetadata.lastSyncAt
+        ? new Date(syncMetadata.lastSyncAt).getTime()
+        : 0;
+      if (Date.now() - lastSyncMs < 24 * 60 * 60 * 1000) return;
+      syncing = true;
+      try {
+        await runLeetCodeSync();
+      } finally {
+        syncing = false;
+      }
+    }
+
+    void tryAutoSync();
+    const interval = window.setInterval(() => {
+      void tryAutoSync();
+    }, 30 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [
+    hydrated,
+    settings.leetCodeUsername,
+    syncMetadata.lastSyncAt,
+    syncMetadata.status,
+    runLeetCodeSync,
+  ]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -4248,6 +6506,10 @@ export default function App() {
       if ((event.metaKey || event.ctrlKey) && event.key === ",") {
         event.preventDefault();
         navigate("/settings");
+      }
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setQuickCaptureOpen(true);
       }
       if ((event.metaKey || event.ctrlKey) && ["1", "2", "3", "4", "5", "6"].includes(event.key)) {
         event.preventDefault();
@@ -4269,58 +6531,223 @@ export default function App() {
         setCommandPaletteOpen(false);
         setTopbarSearchOpen(false);
         setShortcutHelpOpen(false);
+        setQuickCaptureOpen(false);
+        setAiPanelOpen(false);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [navigate]);
 
+  function saveQuickCapture() {
+    const trimmedContent = quickCaptureContent.trim();
+    if (!trimmedContent) return;
+    upsertNote({
+      title: quickCaptureTitle.trim() || t("quickCapture.defaultNoteTitle"),
+      template: "custom",
+      content: `<p>${trimmedContent.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</p>`,
+      tags: ["quick-capture"],
+    });
+    setQuickCaptureOpen(false);
+    setQuickCaptureTitle("");
+    setQuickCaptureContent("");
+    navigate("/notes");
+  }
+
+  function currentModuleLabel(pathname: string):
+    | "Dashboard"
+    | "LeetCode"
+    | "Reading"
+    | "Calendar"
+    | "Notes"
+    | "Groups" {
+    if (pathname.startsWith("/leetcode")) return "LeetCode";
+    if (pathname.startsWith("/reading")) return "Reading";
+    if (pathname.startsWith("/calendar")) return "Calendar";
+    if (pathname.startsWith("/notes")) return "Notes";
+    if (pathname.startsWith("/groups")) return "Groups";
+    return "Dashboard";
+  }
+
+  function currentModuleDisplay(pathname: string): string {
+    const module = currentModuleLabel(pathname);
+    if (module === "LeetCode") return t("modules.leetcode");
+    if (module === "Reading") return t("modules.reading");
+    if (module === "Calendar") return t("modules.calendar");
+    if (module === "Notes") return t("modules.notes");
+    if (module === "Groups") return t("modules.groups");
+    return t("modules.dashboard");
+  }
+
+  async function sendAiMessage(message: string) {
+    const trimmed = sanitizeAiPrompt(message, 6000);
+    if (!trimmed) return;
+    const userMessage: AiChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text: trimmed,
+      at: new Date().toISOString(),
+    };
+    setAiMessages((prev) => [...prev, userMessage]);
+    setAiInput("");
+
+    if (!settings.aiEnabled) {
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "system",
+          text: t("ai.messages.chatDisabledGlobal"),
+          at: new Date().toISOString(),
+        },
+      ]);
+      return;
+    }
+    if (!settings.aiFeatureChat) {
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "system",
+          text: t("ai.messages.chatPanelDisabled"),
+          at: new Date().toISOString(),
+        },
+      ]);
+      return;
+    }
+    if (!settings.aiPrivacyAcknowledged) {
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "system",
+          text: t("ai.messages.acknowledgePrivacyChat"),
+          at: new Date().toISOString(),
+        },
+      ]);
+      return;
+    }
+    if (settings.aiProvider === "byok" && !settings.aiApiKey.trim()) {
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "system",
+          text: t("ai.messages.byokMissingChat"),
+          at: new Date().toISOString(),
+        },
+      ]);
+      return;
+    }
+    const quota = consumeAiQuota(settings.aiProvider);
+    if (!quota.ok) {
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "system",
+          text: t("ai.messages.freeTierReached"),
+          at: new Date().toISOString(),
+        },
+      ]);
+      return;
+    }
+
+    setAiThinking(true);
+    const assistantId = crypto.randomUUID();
+    setAiMessages((prev) => [
+      ...prev,
+      {
+        id: assistantId,
+        role: "assistant",
+        text: "",
+        at: new Date().toISOString(),
+      },
+    ]);
+    try {
+      const moduleName = currentModuleLabel(location.pathname);
+      for await (const chunk of streamAiResponseLazy({
+        prompt: trimmed,
+        moduleName,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        apiKey: settings.aiApiKey,
+        context: {
+          problemsCount: problems.length,
+          knowledgePointsCount: knowledgePoints.length,
+          eventsCount: events.length,
+          notesCount: notes.length,
+        },
+      })) {
+        setAiMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantId ? { ...msg, text: msg.text + chunk } : msg
+          )
+        );
+      }
+    } catch {
+      setAiMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantId
+            ? {
+                ...msg,
+                role: "system",
+                text: t("ai.messages.providerError"),
+              }
+            : msg
+        )
+      );
+    } finally {
+      setAiThinking(false);
+    }
+  }
+
   const commandResults = useMemo(() => {
     const q = globalSearchQuery.trim().toLowerCase();
     const base = [
-      { id: "go-home", label: "Go to Dashboard", description: "Open dashboard", route: "/" },
-      { id: "go-leetcode", label: "Go to LeetCode", description: "Problem tracking", route: "/leetcode" },
-      { id: "go-reading", label: "Go to Reading", description: "Books and knowledge points", route: "/reading" },
-      { id: "go-calendar", label: "Go to Calendar", description: "Schedule and reminders", route: "/calendar" },
-      { id: "go-notes", label: "Go to Notes", description: "Quick notes and templates", route: "/notes" },
-      { id: "go-groups", label: "Go to Groups", description: "Study groups", route: "/groups" },
-      { id: "go-settings", label: "Go to Settings", description: "Preferences", route: "/settings" },
+      { id: "go-home", label: t("command.goDashboard"), description: t("command.openDashboard"), route: "/" },
+      { id: "go-leetcode", label: t("command.goLeetCode"), description: t("command.problemTracking"), route: "/leetcode" },
+      { id: "go-reading", label: t("command.goReading"), description: t("command.booksKnowledge"), route: "/reading" },
+      { id: "go-calendar", label: t("command.goCalendar"), description: t("command.scheduleReminders"), route: "/calendar" },
+      { id: "go-notes", label: t("command.goNotes"), description: t("command.quickNotesTemplates"), route: "/notes" },
+      { id: "go-groups", label: t("command.goGroups"), description: t("command.studyGroups"), route: "/groups" },
+      { id: "go-settings", label: t("command.goSettings"), description: t("command.preferences"), route: "/settings" },
     ];
     const dynamic = [
       ...notes.map((note) => ({
         id: `note-${note.id}`,
-        label: `Note: ${note.title}`,
-        description: "Open Notes module",
+        label: `${t("command.notePrefix")}: ${note.title}`,
+        description: t("command.openNotesModule"),
         route: "/notes",
       })),
       ...books.map((book) => ({
         id: `book-${book.id}`,
-        label: `Book: ${book.title}`,
-        description: "Open Reading module",
+        label: `${t("command.bookPrefix")}: ${book.title}`,
+        description: t("command.openReadingModule"),
         route: "/reading",
       })),
       ...events.map((event) => ({
         id: `event-${event.id}`,
-        label: `Event: ${event.title}`,
-        description: "Open Calendar module",
+        label: `${t("command.eventPrefix")}: ${event.title}`,
+        description: t("command.openCalendarModule"),
         route: "/calendar",
       })),
       ...groups.map((group) => ({
         id: `group-${group.id}`,
-        label: `Group: ${group.name}`,
-        description: "Open Groups module",
+        label: `${t("command.groupPrefix")}: ${group.name}`,
+        description: t("command.openGroupsModule"),
         route: "/groups",
       })),
       ...problems.map((problem) => ({
         id: `problem-${problem.id}`,
-        label: `Problem #${problem.problemNumber}: ${problem.title}`,
-        description: "Open LeetCode module",
+        label: `${t("command.problemPrefix")} #${problem.problemNumber}: ${problem.title}`,
+        description: t("command.openLeetCodeModule"),
         route: "/leetcode",
       })),
       ...knowledgePoints.map((point) => ({
         id: `kp-${point.id}`,
-        label: `Knowledge: ${point.title}`,
-        description: "Open Reading module",
+        label: `${t("command.knowledgePrefix")}: ${point.title}`,
+        description: t("command.openReadingModule"),
         route: "/reading",
       })),
     ];
@@ -4431,11 +6858,14 @@ export default function App() {
           notifiedReminderIdsRef.current.add(reminderKey);
           if (isWithinQuietHours(reminderAt)) return;
 
-          const title = `Upcoming: ${event.title}`;
-          const body = `${new Date(event.startTime).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          })} • ${event.type}`;
+          const title = t("calendar.notificationUpcomingTitle", { title: event.title });
+          const body = t("calendar.notificationUpcomingBody", {
+            time: new Date(event.startTime).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+            type: event.type,
+          });
           new Notification(title, { body, tag: reminderKey });
         });
       }
@@ -4463,8 +6893,12 @@ export default function App() {
               (point) =>
                 point.nextReviewDate && point.nextReviewDate.slice(0, 10) <= todayKey
             ).length;
-            new Notification("Daily Study Digest", {
-              body: `Today: ${todayEventCount} events, ${reviewDueProblems} LeetCode reviews, ${reviewDueKnowledge} reading reviews.`,
+            new Notification(t("calendar.notificationDailyDigestTitle"), {
+              body: t("calendar.notificationDailyDigestBody", {
+                eventCount: todayEventCount,
+                problemCount: reviewDueProblems,
+                knowledgeCount: reviewDueKnowledge,
+              }),
               tag: digestKey,
             });
           }
@@ -4487,8 +6921,8 @@ export default function App() {
                 (item.dateSolved ?? item.updatedAt).slice(0, 10) === todayKey
             );
             if (!solvedToday) {
-              new Notification("Keep your streak alive", {
-                body: "Solve at least one problem today to maintain your LeetCode streak.",
+              new Notification(t("calendar.notificationStreakTitle"), {
+                body: t("calendar.notificationStreakBody"),
                 tag: streakKey,
               });
             }
@@ -4517,8 +6951,11 @@ export default function App() {
                 point.nextReviewDate && point.nextReviewDate.slice(0, 10) <= todayKey
             ).length;
             if (reviewDueProblems + reviewDueKnowledge > 0) {
-              new Notification("Review queue due", {
-                body: `${reviewDueProblems} problems and ${reviewDueKnowledge} knowledge cards are due.`,
+              new Notification(t("calendar.notificationReviewDueTitle"), {
+                body: t("calendar.notificationReviewDueBody", {
+                  problemCount: reviewDueProblems,
+                  knowledgeCount: reviewDueKnowledge,
+                }),
                 tag: reviewKey,
               });
             }
@@ -4548,7 +6985,11 @@ export default function App() {
   ]);
 
   if (!hydrated) {
-    return <div className="loading-screen">Loading your workspace...</div>;
+    return <div className="loading-screen">{t("app.loadingWorkspace")}</div>;
+  }
+
+  if (isAuthConfigured && !session) {
+    return <AuthPage loading={authLoading} onAuthenticated={setSession} />;
   }
 
   return (
@@ -4566,7 +7007,7 @@ export default function App() {
               }
             >
               <span aria-hidden>{item.icon}</span>
-              <span>{item.label}</span>
+              <span>{t(item.labelKey)}</span>
             </NavLink>
           ))}
           <NavLink
@@ -4576,7 +7017,7 @@ export default function App() {
             }
           >
             <span aria-hidden>⚙️</span>
-            <span>{t("settings")}</span>
+            <span>{t("common.settings")}</span>
           </NavLink>
         </nav>
       </aside>
@@ -4596,7 +7037,7 @@ export default function App() {
             />
             {topbarSearchOpen && (
               <div className="global-search-results">
-                {commandResults.length === 0 && <small>No results</small>}
+                {commandResults.length === 0 && <small>{t("command.noResults")}</small>}
                 {commandResults.map((item) => (
                   <button
                     key={item.id}
@@ -4610,7 +7051,16 @@ export default function App() {
               </div>
             )}
           </div>
-          <button type="button">AI Panel</button>
+          <button
+            type="button"
+            onClick={() => {
+              setAiPanelOpen((open) => !open);
+              setCommandPaletteOpen(false);
+              setTopbarSearchOpen(false);
+            }}
+          >
+            {t("topbar.aiPanel")}
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -4618,11 +7068,26 @@ export default function App() {
               setTopbarSearchOpen(false);
             }}
           >
-            Command Palette
+            {t("topbar.commandPalette")}
           </button>
           <button type="button" onClick={() => setShortcutHelpOpen(true)}>
-            Shortcuts
+            {t("topbar.shortcuts")}
           </button>
+          {isAuthConfigured && (
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => void signOutCurrentUser()}
+            >
+              {t("auth.signOut")}
+            </button>
+          )}
+          {settings.aiEnabled && (
+            <span className="ai-model-indicator">
+              Powered by {settings.aiProvider === "byok" ? "BYOK" : "Free Default"} •{" "}
+              {settings.aiModel}
+            </span>
+          )}
         </header>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
@@ -4636,18 +7101,42 @@ export default function App() {
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </main>
+      <nav className="mobile-bottom-nav" aria-label="Mobile Navigation">
+        {navItems.map((item) => (
+          <NavLink
+            key={`mobile-${item.to}`}
+            to={item.to}
+            end={item.to === "/"}
+            className={({ isActive }) =>
+              `mobile-bottom-nav-item${isActive ? " mobile-bottom-nav-item-active" : ""}`
+            }
+          >
+            <span aria-hidden>{item.icon}</span>
+            <span>{t(item.labelKey)}</span>
+          </NavLink>
+        ))}
+        <NavLink
+          to="/settings"
+          className={({ isActive }) =>
+            `mobile-bottom-nav-item${isActive ? " mobile-bottom-nav-item-active" : ""}`
+          }
+        >
+          <span aria-hidden>⚙️</span>
+          <span>{t("common.settings")}</span>
+        </NavLink>
+      </nav>
       {commandPaletteOpen && (
         <div className="command-palette-overlay" onClick={() => setCommandPaletteOpen(false)}>
           <div className="command-palette" onClick={(event) => event.stopPropagation()}>
             <input
               autoFocus
               type="search"
-              placeholder="Type a command or search..."
+              placeholder={t("command.typeCommandSearch")}
               value={globalSearchQuery}
               onChange={(event) => setGlobalSearchQuery(event.target.value)}
             />
             <div className="command-list">
-              {commandResults.length === 0 && <small>No matching command</small>}
+              {commandResults.length === 0 && <small>{t("command.noMatchingCommand")}</small>}
               {commandResults.map((item) => (
                 <button key={`cp-${item.id}`} type="button" onClick={() => runCommand(item.route)}>
                   <strong>{item.label}</strong>
@@ -4661,26 +7150,112 @@ export default function App() {
       {shortcutHelpOpen && (
         <div className="command-palette-overlay" onClick={() => setShortcutHelpOpen(false)}>
           <div className="command-palette" onClick={(event) => event.stopPropagation()}>
-            <h2>Keyboard Shortcuts</h2>
+            <h2>{t("shortcuts.title")}</h2>
             <div className="shortcut-list">
-              <div><kbd>⌘/Ctrl</kbd> + <kbd>K</kbd> <span>Open command palette</span></div>
-              <div><kbd>⌘/Ctrl</kbd> + <kbd>1</kbd> <span>Go to Dashboard</span></div>
-              <div><kbd>⌘/Ctrl</kbd> + <kbd>2</kbd> <span>Go to LeetCode</span></div>
-              <div><kbd>⌘/Ctrl</kbd> + <kbd>3</kbd> <span>Go to Reading</span></div>
-              <div><kbd>⌘/Ctrl</kbd> + <kbd>4</kbd> <span>Go to Calendar</span></div>
-              <div><kbd>⌘/Ctrl</kbd> + <kbd>5</kbd> <span>Go to Notes</span></div>
-              <div><kbd>⌘/Ctrl</kbd> + <kbd>6</kbd> <span>Go to Groups</span></div>
-              <div><kbd>⌘/Ctrl</kbd> + <kbd>,</kbd> <span>Open Settings</span></div>
-              <div><kbd>?</kbd> <span>Open this shortcut help</span></div>
-              <div><kbd>Esc</kbd> <span>Close overlays</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>K</kbd> <span>{t("shortcuts.openPalette")}</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>1</kbd> <span>{t("shortcuts.goDashboard")}</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>2</kbd> <span>{t("shortcuts.goLeetCode")}</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>3</kbd> <span>{t("shortcuts.goReading")}</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>4</kbd> <span>{t("shortcuts.goCalendar")}</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>5</kbd> <span>{t("shortcuts.goNotes")}</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>6</kbd> <span>{t("shortcuts.goGroups")}</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>,</kbd> <span>{t("shortcuts.openSettings")}</span></div>
+              <div><kbd>?</kbd> <span>{t("shortcuts.openHelp")}</span></div>
+              <div><kbd>Esc</kbd> <span>{t("shortcuts.closeOverlays")}</span></div>
             </div>
             <div className="actions-row">
               <button type="button" onClick={() => setShortcutHelpOpen(false)}>
-                Close
+                {t("common.close")}
               </button>
             </div>
           </div>
         </div>
+      )}
+      {quickCaptureOpen && (
+        <div className="command-palette-overlay" onClick={() => setQuickCaptureOpen(false)}>
+          <div className="quick-capture-modal" onClick={(event) => event.stopPropagation()}>
+            <h3>{t("quickCapture.title")}</h3>
+            <small>{t("quickCapture.subtitle")}</small>
+            <label>
+              <span>{t("quickCapture.titleOptional")}</span>
+              <input
+                value={quickCaptureTitle}
+                onChange={(event) => setQuickCaptureTitle(event.target.value)}
+                placeholder={t("quickCapture.titlePlaceholder")}
+              />
+            </label>
+            <label>
+              <span>{t("quickCapture.content")}</span>
+              <textarea
+                rows={7}
+                value={quickCaptureContent}
+                onChange={(event) => setQuickCaptureContent(event.target.value)}
+                placeholder={t("quickCapture.contentPlaceholder")}
+              />
+            </label>
+            <div className="actions-row">
+              <button type="button" onClick={saveQuickCapture}>
+                {t("quickCapture.save")}
+              </button>
+              <button type="button" className="button-secondary" onClick={() => setQuickCaptureOpen(false)}>
+                {t("common.cancel")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {aiPanelOpen && (
+        <aside className="ai-panel">
+          <div className="ai-panel-header">
+            <strong>{t("ai.panelTitle")}</strong>
+            <button type="button" className="button-secondary" onClick={() => setAiPanelOpen(false)}>
+              {t("common.close")}
+            </button>
+          </div>
+          <small>
+            Context: {currentModuleDisplay(location.pathname)} •{" "}
+            {settings.aiProvider === "byok" ? "BYOK" : "Free Default"} • {settings.aiModel}
+          </small>
+          <div className="chip-list ai-quick-prompts">
+            <button type="button" className="button-secondary" onClick={() => void sendAiMessage(t("ai.quickPromptNextAction"))}>
+              {t("ai.quickNextAction")}
+            </button>
+            <button type="button" className="button-secondary" onClick={() => void sendAiMessage(t("ai.quickPromptDailyFocus"))}>
+              {t("ai.quickDailyFocus")}
+            </button>
+            <button type="button" className="button-secondary" onClick={() => void sendAiMessage(t("ai.quickPromptChecklist"))}>
+              {t("ai.quickChecklist")}
+            </button>
+          </div>
+          <div className="ai-messages">
+            {aiMessages.length === 0 && (
+              <small>{t("ai.askAnythingPrompt")}</small>
+            )}
+            {aiMessages.map((message) => (
+              <div key={message.id} className={`ai-msg ai-msg-${message.role}`}>
+                <strong>{message.role}</strong>
+                <p>{message.text}</p>
+              </div>
+            ))}
+            {aiThinking && <small>Thinking...</small>}
+          </div>
+          <form
+            className="ai-input-row"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void sendAiMessage(aiInput);
+            }}
+          >
+            <input
+              value={aiInput}
+              onChange={(event) => setAiInput(event.target.value)}
+              placeholder="Ask AI for hints, explainers, or planning help..."
+            />
+            <button type="submit" disabled={aiThinking}>
+              Send
+            </button>
+          </form>
+        </aside>
       )}
     </div>
   );
