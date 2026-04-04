@@ -1,0 +1,43 @@
+{
+  "name": "notebook2.0",
+  "version": "1.0.0",
+  "description": "A notebook design for students",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "check": "tsc --noEmit",
+    "lint": "echo 'Linting to be configured'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EltonChang1/Notebook2.0.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/EltonChang1/Notebook2.0/issues"
+  },
+  "homepage": "https://github.com/EltonChang1/Notebook2.0#readme",
+  "dependencies": {
+    "dexie": "^4.4.2",
+    "i18next": "^26.0.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-i18next": "^17.0.2",
+    "react-router-dom": "^7.14.0",
+    "react-window": "^2.2.7",
+    "zustand": "^5.0.12"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.3"
+  },
+  "private": true
+}
