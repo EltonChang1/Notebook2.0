@@ -18,6 +18,7 @@ import type {
   EventType,
   Importance,
   LeetCodeProblem,
+  NoteTemplate,
   ProblemStatus,
   ThemePreference,
 } from "./models/domain";
@@ -2354,7 +2355,14 @@ function CalendarPage() {
   const settings = useAppStore((state) => state.settings);
   const upsertEvent = useAppStore((state) => state.upsertEvent);
   const deleteEvent = useAppStore((state) => state.deleteEvent);
+  const problems = useAppStore((state) => state.problems);
+  const books = useAppStore((state) => state.books);
+  const navigate = useNavigate();
   const [viewMode, setViewMode] = useState<"day" | "week" | "month" | "agenda">("week");
+  const [isMobileCalendar, setIsMobileCalendar] = useState<boolean>(() =>
+    typeof window === "undefined" ? false : window.innerWidth <= 880
+  );
+  const [showMobileDayGrid, setShowMobileDayGrid] = useState(false);
   const [focusDate, setFocusDate] = useState(new Date().toISOString().slice(0, 10));
   const [showEventForm, setShowEventForm] = useState(false);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
@@ -2367,6 +2375,10 @@ function CalendarPage() {
   );
   const [eventRecurrenceUntil, setEventRecurrenceUntil] = useState("");
   const [eventReminderMinutesBefore, setEventReminderMinutesBefore] = useState<"0" | "5" | "10" | "15" | "30" | "60">("15");
+  const [eventLinkedModule, setEventLinkedModule] = useState<
+    "none" | "leetcode" | "reading" | "notes" | "groups"
+  >("none");
+  const [eventLinkedItemId, setEventLinkedItemId] = useState("");
   const [eventDescription, setEventDescription] = useState("");
   const [timerMode, setTimerMode] = useState<"focus" | "shortBreak" | "longBreak">("focus");
   const [timerRunning, setTimerRunning] = useState(false);
@@ -2558,6 +2570,28 @@ function CalendarPage() {
   }, [dragCreateStartSlot, dragCreateEndSlot]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    function onResize() {
+      setIsMobileCalendar(window.innerWidth <= 880);
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    if (!isMobileCalendar) return;
+    if (viewMode === "week" || viewMode === "month") {
+      setViewMode("agenda");
+    }
+  }, [isMobileCalendar, viewMode]);
+
+  useEffect(() => {
+    if (!isMobileCalendar) {
+      setShowMobileDayGrid(false);
+    }
+  }, [isMobileCalendar]);
+
+  useEffect(() => {
     if (!resizingEventId) return;
     function onMouseMove(event: MouseEvent) {
       const resizeState = resizeStateRef.current;
@@ -2643,6 +2677,8 @@ function CalendarPage() {
     setEventRecurrence("none");
     setEventRecurrenceUntil("");
     setEventReminderMinutesBefore("15");
+    setEventLinkedModule("none");
+    setEventLinkedItemId("");
     setEventDescription("");
   }
 
@@ -2662,6 +2698,8 @@ function CalendarPage() {
       recurrenceUntil: eventRecurrence === "none" ? undefined : eventRecurrenceUntil || undefined,
       reminderMinutesBefore:
         eventReminderMinutesBefore === "0" ? undefined : Number(eventReminderMinutesBefore),
+      linkedModule: eventLinkedModule === "none" ? undefined : eventLinkedModule,
+      linkedItemId: eventLinkedModule === "none" ? undefined : eventLinkedItemId || undefined,
       description: eventDescription.trim() || undefined,
     });
     setShowEventForm(false);
@@ -2679,8 +2717,28 @@ function CalendarPage() {
     setEventReminderMinutesBefore(
       String(event.reminderMinutesBefore ?? 15) as "0" | "5" | "10" | "15" | "30" | "60"
     );
+    setEventLinkedModule(event.linkedModule ?? "none");
+    setEventLinkedItemId(event.linkedItemId ?? "");
     setEventDescription(event.description ?? "");
     setShowEventForm(true);
+  }
+
+  function goToLinkedTarget(event: CalendarEvent) {
+    if (event.linkedModule === "leetcode") {
+      navigate("/leetcode");
+      return;
+    }
+    if (event.linkedModule === "reading") {
+      navigate("/reading");
+      return;
+    }
+    if (event.linkedModule === "notes") {
+      navigate("/notes");
+      return;
+    }
+    if (event.linkedModule === "groups") {
+      navigate("/groups");
+    }
   }
 
   function resetTimerForMode(mode: "focus" | "shortBreak" | "longBreak") {
@@ -2868,6 +2926,28 @@ function CalendarPage() {
         </button>
       </div>
 
+      {isMobileCalendar && (
+        <div className="calendar-mobile-switch">
+          <small>Mobile quick views</small>
+          <div className="actions-row">
+            <button
+              type="button"
+              className={viewMode === "day" ? "button-secondary view-active" : "button-secondary"}
+              onClick={() => setViewMode("day")}
+            >
+              Day
+            </button>
+            <button
+              type="button"
+              className={viewMode === "agenda" ? "button-secondary view-active" : "button-secondary"}
+              onClick={() => setViewMode("agenda")}
+            >
+              Agenda
+            </button>
+          </div>
+        </div>
+      )}
+
       <article className="tile focus-mode-tile">
         <h2>Focus Mode</h2>
         <small>{completedFocusSessions} focus session(s) completed today</small>
@@ -3043,6 +3123,60 @@ function CalendarPage() {
                 <option value="60">1 hour before</option>
               </select>
             </label>
+            <label>
+              <span>Linked Module</span>
+              <select
+                value={eventLinkedModule}
+                onChange={(e) => {
+                  const value = e.target.value as
+                    | "none"
+                    | "leetcode"
+                    | "reading"
+                    | "notes"
+                    | "groups";
+                  setEventLinkedModule(value);
+                  setEventLinkedItemId("");
+                }}
+              >
+                <option value="none">None</option>
+                <option value="leetcode">LeetCode</option>
+                <option value="reading">Reading</option>
+                <option value="notes">Notes</option>
+                <option value="groups">Groups</option>
+              </select>
+            </label>
+            {eventLinkedModule === "leetcode" && (
+              <label>
+                <span>Linked Problem</span>
+                <select
+                  value={eventLinkedItemId}
+                  onChange={(e) => setEventLinkedItemId(e.target.value)}
+                >
+                  <option value="">None</option>
+                  {problems.slice(0, 200).map((problem) => (
+                    <option key={problem.id} value={problem.id}>
+                      #{problem.problemNumber} {problem.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {eventLinkedModule === "reading" && (
+              <label>
+                <span>Linked Book</span>
+                <select
+                  value={eventLinkedItemId}
+                  onChange={(e) => setEventLinkedItemId(e.target.value)}
+                >
+                  <option value="">None</option>
+                  {books.map((book) => (
+                    <option key={book.id} value={book.id}>
+                      {book.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label className="full-width">
               <span>Description</span>
               <textarea
@@ -3073,36 +3207,70 @@ function CalendarPage() {
         {viewMode === "day" && (
           <div className="calendar-day-planner">
             <small>Drag across time slots to create an event quickly.</small>
-            <div className="calendar-day-grid" onMouseLeave={onDaySlotMouseUp}>
-              {Array.from({ length: slotsPerDay }).map((_, slotIndex) => {
-                const inDraggedRange =
-                  draggedSlotRange !== null &&
-                  slotIndex >= draggedSlotRange.start &&
-                  slotIndex <= draggedSlotRange.end;
-                const hasEvent = dayEvents.some((event) => isEventCoveringSlot(event, slotIndex));
-                const hour = String(Math.floor(slotIndex / 2)).padStart(2, "0");
-                const minute = slotIndex % 2 === 0 ? "00" : "30";
-                return (
-                  <button
-                    key={`slot-${slotIndex}`}
-                    type="button"
-                    className={`calendar-slot${inDraggedRange ? " calendar-slot-selected" : ""}${
-                      hasEvent ? " calendar-slot-has-event" : ""
-                    }`}
-                    onMouseDown={() => onDaySlotMouseDown(slotIndex)}
-                    onMouseEnter={() => onDaySlotMouseEnter(slotIndex)}
-                    onMouseUp={onDaySlotMouseUp}
-                  >
-                    <span>{`${hour}:${minute}`}</span>
-                  </button>
-                );
-              })}
-            </div>
+            {isMobileCalendar && (
+              <div className="mobile-day-list">
+                {dayEvents.length === 0 && <small>No events for this day.</small>}
+                {dayEvents.map((event) => (
+                  <article key={`mobile-day-${event.occurrenceId}`} className="mobile-event-card">
+                    <strong>{event.title}</strong>
+                    <small>
+                      {new Date(event.startTime).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}{" "}
+                      -{" "}
+                      {new Date(event.endTime).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </small>
+                    <span className={`event-type event-type-${event.type}`}>{event.type}</span>
+                  </article>
+                ))}
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => setShowMobileDayGrid((prev) => !prev)}
+                >
+                  {showMobileDayGrid ? "Hide Time Grid" : "Show Time Grid"}
+                </button>
+              </div>
+            )}
+            {(!isMobileCalendar || showMobileDayGrid) && (
+              <div className="calendar-day-grid" onMouseLeave={onDaySlotMouseUp}>
+                {Array.from({ length: slotsPerDay }).map((_, slotIndex) => {
+                  const inDraggedRange =
+                    draggedSlotRange !== null &&
+                    slotIndex >= draggedSlotRange.start &&
+                    slotIndex <= draggedSlotRange.end;
+                  const hasEvent = dayEvents.some((event) => isEventCoveringSlot(event, slotIndex));
+                  const hour = String(Math.floor(slotIndex / 2)).padStart(2, "0");
+                  const minute = slotIndex % 2 === 0 ? "00" : "30";
+                  return (
+                    <button
+                      key={`slot-${slotIndex}`}
+                      type="button"
+                      className={`calendar-slot${inDraggedRange ? " calendar-slot-selected" : ""}${
+                        hasEvent ? " calendar-slot-has-event" : ""
+                      }`}
+                      onMouseDown={() => onDaySlotMouseDown(slotIndex)}
+                      onMouseEnter={() => onDaySlotMouseEnter(slotIndex)}
+                      onMouseUp={onDaySlotMouseUp}
+                    >
+                      <span>{`${hour}:${minute}`}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
         {visibleEvents.length === 0 && <p>No events in this range.</p>}
         {groupedDates.map((dateKey) => (
-          <div key={dateKey} className="event-group">
+          <div
+            key={dateKey}
+            className={`event-group${isMobileCalendar && viewMode === "agenda" ? " event-group-mobile" : ""}`}
+          >
             <h3>{new Date(`${dateKey}T00:00:00`).toLocaleDateString()}</h3>
             <ul>
               {groupedEvents[dateKey].map((event) => (
@@ -3122,6 +3290,12 @@ function CalendarPage() {
                     )}
                     {typeof event.reminderMinutesBefore === "number" && (
                       <small>Reminder: {event.reminderMinutesBefore} min before</small>
+                    )}
+                    {event.linkedModule && (
+                      <small>
+                        Linked: {event.linkedModule}
+                        {event.linkedItemId ? ` (${event.linkedItemId.slice(0, 8)})` : ""}
+                      </small>
                     )}
                     {event.description && <small>{event.description}</small>}
                   </div>
@@ -3145,6 +3319,33 @@ function CalendarPage() {
                     >
                       Delete
                     </button>
+                    {event.linkedModule && (
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={() => goToLinkedTarget(event)}
+                      >
+                        Open Linked
+                      </button>
+                    )}
+                    {event.type === "leetcode" && (
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={() => navigate("/leetcode")}
+                      >
+                        Log Problem
+                      </button>
+                    )}
+                    {event.type === "study" && (
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={() => navigate("/reading")}
+                      >
+                        Capture Knowledge
+                      </button>
+                    )}
                   </div>
                 </li>
               ))}
@@ -3157,15 +3358,547 @@ function CalendarPage() {
 }
 
 function NotesPage() {
+  const notes = useAppStore((state) => state.notes);
+  const problems = useAppStore((state) => state.problems);
+  const books = useAppStore((state) => state.books);
+  const events = useAppStore((state) => state.events);
+  const groups = useAppStore((state) => state.groups);
+  const upsertNote = useAppStore((state) => state.upsertNote);
+  const deleteNote = useAppStore((state) => state.deleteNote);
+  const navigate = useNavigate();
+  const [search, setSearch] = useState("");
+  const [activeNoteId, setActiveNoteId] = useState<string>("");
+  const [title, setTitle] = useState("");
+  const [template, setTemplate] = useState<NoteTemplate>("custom");
+  const [content, setContent] = useState("");
+  const [tagsInput, setTagsInput] = useState("");
+  const [linkedModule, setLinkedModule] = useState<"none" | "leetcode" | "reading" | "calendar" | "groups">(
+    "none"
+  );
+  const [linkedItemId, setLinkedItemId] = useState("");
+
+  const templateBodies: Record<NoteTemplate, { title: string; content: string }> = {
+    custom: { title: "", content: "" },
+    lecture: {
+      title: "Lecture Notes",
+      content:
+        "# Lecture\n\n## Key Ideas\n- \n\n## Examples\n- \n\n## Questions\n- \n\n## Next Actions\n- [[calendar]] Review and summarize",
+    },
+    algorithm: {
+      title: "Algorithm Note",
+      content:
+        "# Problem Context\n\n## Approach\n- \n\n## Complexity\n- Time: \n- Space: \n\n## Edge Cases\n- \n\n## Related\n- [[leetcode]]",
+    },
+    meeting: {
+      title: "Meeting Notes",
+      content:
+        "# Agenda\n- \n\n## Discussion\n- \n\n## Decisions\n- \n\n## Action Items\n- [ ] \n\n## Follow-up\n- [[groups]]",
+    },
+    weekly_reflection: {
+      title: "Weekly Reflection",
+      content:
+        "# Wins\n- \n\n# Challenges\n- \n\n# Learnings\n- \n\n# Focus Next Week\n- [[reading]]\n- [[leetcode]]",
+    },
+  };
+
+  useEffect(() => {
+    if (!activeNoteId && notes.length > 0) {
+      setActiveNoteId(notes[0].id);
+    }
+    if (activeNoteId && !notes.some((note) => note.id === activeNoteId)) {
+      setActiveNoteId(notes[0]?.id ?? "");
+    }
+  }, [notes, activeNoteId]);
+
+  useEffect(() => {
+    const active = notes.find((note) => note.id === activeNoteId);
+    if (!active) return;
+    setTitle(active.title);
+    setTemplate(active.template);
+    setContent(active.content);
+    setTagsInput(active.tags.join(", "));
+    setLinkedModule(active.linkedModule ?? "none");
+    setLinkedItemId(active.linkedItemId ?? "");
+  }, [activeNoteId, notes]);
+
+  const filteredNotes = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return notes;
+    return notes.filter(
+      (note) =>
+        note.title.toLowerCase().includes(q) ||
+        note.content.toLowerCase().includes(q) ||
+        note.tags.some((tag) => tag.toLowerCase().includes(q))
+    );
+  }, [notes, search]);
+
+  const wikilinks = useMemo(() => {
+    const matches = content.matchAll(/\[\[([^[\]]+)\]\]/g);
+    return [...new Set(Array.from(matches, (m) => m[1].trim()))];
+  }, [content]);
+
+  const resolvedWikilinks = useMemo(() => {
+    return wikilinks.map((raw) => {
+      const [prefix, ...rest] = raw.split(":");
+      const maybeQuery = rest.join(":").trim();
+      const normalizedPrefix = prefix.trim().toLowerCase();
+      const hasPrefix = raw.includes(":");
+      const lookupQuery = (hasPrefix ? maybeQuery : raw).toLowerCase();
+
+      if (!lookupQuery && hasPrefix) {
+        return { raw, status: "unresolved" as const };
+      }
+
+      if (normalizedPrefix === "leetcode" || (!hasPrefix && normalizedPrefix === "leetcode")) {
+        return { raw, status: "route" as const, route: "/leetcode" };
+      }
+      if (normalizedPrefix === "reading" || (!hasPrefix && normalizedPrefix === "reading")) {
+        return { raw, status: "route" as const, route: "/reading" };
+      }
+      if (normalizedPrefix === "calendar" || (!hasPrefix && normalizedPrefix === "calendar")) {
+        return { raw, status: "route" as const, route: "/calendar" };
+      }
+      if (normalizedPrefix === "groups" || (!hasPrefix && normalizedPrefix === "groups")) {
+        return { raw, status: "route" as const, route: "/groups" };
+      }
+      if (normalizedPrefix === "notes" || (!hasPrefix && normalizedPrefix === "notes")) {
+        return { raw, status: "route" as const, route: "/notes" };
+      }
+
+      if (normalizedPrefix === "book" || normalizedPrefix === "reading") {
+        const matchBook = books.find((book) =>
+          book.title.toLowerCase().includes(lookupQuery)
+        );
+        if (matchBook) {
+          return { raw, status: "route" as const, route: "/reading" };
+        }
+      }
+
+      if (normalizedPrefix === "event" || normalizedPrefix === "calendar") {
+        const matchEvent = events.find((event) =>
+          event.title.toLowerCase().includes(lookupQuery)
+        );
+        if (matchEvent) {
+          return { raw, status: "route" as const, route: "/calendar" };
+        }
+      }
+
+      const noteQuery = hasPrefix ? (normalizedPrefix === "note" || normalizedPrefix === "notes" ? lookupQuery : "") : lookupQuery;
+      if (noteQuery || !hasPrefix) {
+        const target = notes.find((note) => note.title.toLowerCase().includes(noteQuery || lookupQuery));
+        if (target) {
+          return { raw, status: "note" as const, noteId: target.id };
+        }
+      }
+
+      return { raw, status: "unresolved" as const };
+    });
+  }, [wikilinks, books, events, notes]);
+  const resolvedLinkMap = useMemo(
+    () => new Map(resolvedWikilinks.map((item) => [item.raw.toLowerCase(), item])),
+    [resolvedWikilinks]
+  );
+
+  function resetDraft() {
+    setActiveNoteId("");
+    setTitle("");
+    setTemplate("custom");
+    setContent("");
+    setTagsInput("");
+    setLinkedModule("none");
+    setLinkedItemId("");
+  }
+
+  function applyTemplate(nextTemplate: NoteTemplate) {
+    const preset = templateBodies[nextTemplate];
+    setTemplate(nextTemplate);
+    if (!title.trim()) setTitle(preset.title);
+    if (!content.trim()) setContent(preset.content);
+  }
+
+  function saveNote() {
+    if (!title.trim()) return;
+    upsertNote({
+      id: activeNoteId || undefined,
+      title: title.trim(),
+      template,
+      content,
+      tags: tagsInput
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+      linkedModule: linkedModule === "none" ? undefined : linkedModule,
+      linkedItemId: linkedModule === "none" ? undefined : linkedItemId || undefined,
+    });
+  }
+
+  function openResolvedWikilink(link: (typeof resolvedWikilinks)[number]) {
+    if (link.status === "route") {
+      navigate(link.route);
+      return;
+    }
+    if (link.status === "note") {
+      setActiveNoteId(link.noteId);
+      return;
+    }
+  }
+
+  function renderInline(text: string): ReactNode[] {
+    const tokenRegex = /(\[\[[^[\]]+\]\]|\*\*[^*\n]+\*\*|`[^`\n]+`|\$[^$\n]+\$)/g;
+    const parts = text.split(tokenRegex).filter(Boolean);
+    return parts.map((part, idx) => {
+      if (part.startsWith("[[") && part.endsWith("]]")) {
+        const raw = part.slice(2, -2).trim();
+        const resolved = resolvedLinkMap.get(raw.toLowerCase());
+        if (!resolved || resolved.status === "unresolved") {
+          return (
+            <span key={`inline-${idx}`} className="inline-wikilink unresolved-wikilink">
+              [[{raw}]]
+            </span>
+          );
+        }
+        return (
+          <button
+            key={`inline-${idx}`}
+            type="button"
+            className="inline-wikilink"
+            onClick={() => openResolvedWikilink(resolved)}
+          >
+            [[{raw}]]
+          </button>
+        );
+      }
+      if (part.startsWith("**") && part.endsWith("**")) {
+        return <strong key={`inline-${idx}`}>{part.slice(2, -2)}</strong>;
+      }
+      if (part.startsWith("`") && part.endsWith("`")) {
+        return <code key={`inline-${idx}`}>{part.slice(1, -1)}</code>;
+      }
+      if (part.startsWith("$") && part.endsWith("$")) {
+        return (
+          <span key={`inline-${idx}`} className="inline-math">
+            {part.slice(1, -1)}
+          </span>
+        );
+      }
+      return <span key={`inline-${idx}`}>{part}</span>;
+    });
+  }
+
+  function renderMarkdownPreview(markdown: string): ReactNode {
+    if (!markdown.trim()) {
+      return <p>Start writing to preview markdown-like content.</p>;
+    }
+    const lines = markdown.replaceAll("\r\n", "\n").split("\n");
+    const output: ReactNode[] = [];
+    let paragraph: string[] = [];
+    let listItems: string[] = [];
+    let inCode = false;
+    let codeLang = "";
+    let codeLines: string[] = [];
+    let inMathBlock = false;
+    let mathLines: string[] = [];
+
+    const flushParagraph = () => {
+      if (paragraph.length === 0) return;
+      output.push(
+        <p key={`p-${output.length}`}>{renderInline(paragraph.join(" "))}</p>
+      );
+      paragraph = [];
+    };
+    const flushList = () => {
+      if (listItems.length === 0) return;
+      output.push(
+        <ul key={`ul-${output.length}`}>
+          {listItems.map((item, idx) => (
+            <li key={`li-${idx}`}>{renderInline(item)}</li>
+          ))}
+        </ul>
+      );
+      listItems = [];
+    };
+
+    for (const line of lines) {
+      if (line.startsWith("```")) {
+        flushParagraph();
+        flushList();
+        if (!inCode) {
+          inCode = true;
+          codeLang = line.slice(3).trim();
+          codeLines = [];
+        } else {
+          output.push(
+            <pre key={`code-${output.length}`} className="markdown-code-block">
+              <small>{codeLang || "code"}</small>
+              <code>{codeLines.join("\n")}</code>
+            </pre>
+          );
+          inCode = false;
+          codeLang = "";
+          codeLines = [];
+        }
+        continue;
+      }
+      if (inCode) {
+        codeLines.push(line);
+        continue;
+      }
+      if (line.trim() === "$$") {
+        flushParagraph();
+        flushList();
+        if (!inMathBlock) {
+          inMathBlock = true;
+          mathLines = [];
+        } else {
+          output.push(
+            <div key={`math-${output.length}`} className="math-block">
+              {mathLines.join("\n")}
+            </div>
+          );
+          inMathBlock = false;
+          mathLines = [];
+        }
+        continue;
+      }
+      if (inMathBlock) {
+        mathLines.push(line);
+        continue;
+      }
+      if (!line.trim()) {
+        flushParagraph();
+        flushList();
+        continue;
+      }
+      if (line.startsWith("### ")) {
+        flushParagraph();
+        flushList();
+        output.push(
+          <h3 key={`h3-${output.length}`}>{renderInline(line.slice(4).trim())}</h3>
+        );
+        continue;
+      }
+      if (line.startsWith("## ")) {
+        flushParagraph();
+        flushList();
+        output.push(
+          <h2 key={`h2-${output.length}`}>{renderInline(line.slice(3).trim())}</h2>
+        );
+        continue;
+      }
+      if (line.startsWith("# ")) {
+        flushParagraph();
+        flushList();
+        output.push(
+          <h1 key={`h1-${output.length}`}>{renderInline(line.slice(2).trim())}</h1>
+        );
+        continue;
+      }
+      if (line.startsWith("- ")) {
+        flushParagraph();
+        listItems.push(line.slice(2).trim());
+        continue;
+      }
+      paragraph.push(line.trim());
+    }
+
+    flushParagraph();
+    flushList();
+    if (inCode) {
+      output.push(
+        <pre key={`code-tail-${output.length}`} className="markdown-code-block">
+          <small>{codeLang || "code"}</small>
+          <code>{codeLines.join("\n")}</code>
+        </pre>
+      );
+    }
+    if (inMathBlock) {
+      output.push(
+        <div key={`math-tail-${output.length}`} className="math-block">
+          {mathLines.join("\n")}
+        </div>
+      );
+    }
+    return <>{output}</>;
+  }
+
   return (
     <PageCard
       title="Notes"
       subtitle="Quick capture and structured notes for lectures and algorithms."
     >
-      <article className="tile">
-        <h2>Quick Capture</h2>
-        <p>Use Cmd/Ctrl + Shift + N from anywhere.</p>
-      </article>
+      <div className="actions-row">
+        <button type="button" onClick={resetDraft}>
+          New Note
+        </button>
+        <button type="button" className="button-secondary" onClick={saveNote}>
+          Save Note
+        </button>
+      </div>
+
+      <div className="notes-layout">
+        <article className="tile notes-sidebar">
+          <h2>Notes</h2>
+          <input
+            type="search"
+            placeholder="Search notes"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <ul className="notes-list">
+            {filteredNotes.map((note) => (
+              <li key={note.id} className={note.id === activeNoteId ? "note-active" : ""}>
+                <button type="button" onClick={() => setActiveNoteId(note.id)}>
+                  <strong>{note.title}</strong>
+                  <small>{new Date(note.updatedAt).toLocaleDateString()}</small>
+                </button>
+                <button
+                  type="button"
+                  className="button-danger"
+                  onClick={() => {
+                    deleteNote(note.id);
+                    if (note.id === activeNoteId) resetDraft();
+                  }}
+                >
+                  Delete
+                </button>
+              </li>
+            ))}
+          </ul>
+        </article>
+
+        <article className="tile">
+          <h2>Editor</h2>
+          <div className="problem-form-grid">
+            <label>
+              <span>Title</span>
+              <input value={title} onChange={(e) => setTitle(e.target.value)} />
+            </label>
+            <label>
+              <span>Template</span>
+              <select
+                value={template}
+                onChange={(e) => applyTemplate(e.target.value as NoteTemplate)}
+              >
+                <option value="custom">Custom</option>
+                <option value="lecture">Lecture Notes</option>
+                <option value="algorithm">Algorithm Notes</option>
+                <option value="meeting">Meeting Notes</option>
+                <option value="weekly_reflection">Weekly Reflection</option>
+              </select>
+            </label>
+            <label>
+              <span>Linked Module</span>
+              <select
+                value={linkedModule}
+                onChange={(e) =>
+                  setLinkedModule(
+                    e.target.value as "none" | "leetcode" | "reading" | "calendar" | "groups"
+                  )
+                }
+              >
+                <option value="none">None</option>
+                <option value="leetcode">LeetCode</option>
+                <option value="reading">Reading</option>
+                <option value="calendar">Calendar</option>
+                <option value="groups">Groups</option>
+              </select>
+            </label>
+            {linkedModule === "leetcode" && (
+              <label>
+                <span>Linked Problem</span>
+                <select
+                  value={linkedItemId}
+                  onChange={(e) => setLinkedItemId(e.target.value)}
+                >
+                  <option value="">None</option>
+                  {problems.slice(0, 200).map((problem) => (
+                    <option key={problem.id} value={problem.id}>
+                      #{problem.problemNumber} {problem.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {linkedModule === "reading" && (
+              <label>
+                <span>Linked Book</span>
+                <select value={linkedItemId} onChange={(e) => setLinkedItemId(e.target.value)}>
+                  <option value="">None</option>
+                  {books.map((book) => (
+                    <option key={book.id} value={book.id}>
+                      {book.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {linkedModule === "calendar" && (
+              <label>
+                <span>Linked Event</span>
+                <select value={linkedItemId} onChange={(e) => setLinkedItemId(e.target.value)}>
+                  <option value="">None</option>
+                  {events.map((event) => (
+                    <option key={event.id} value={event.id}>
+                      {event.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {linkedModule === "groups" && (
+              <label>
+                <span>Linked Group</span>
+                <select value={linkedItemId} onChange={(e) => setLinkedItemId(e.target.value)}>
+                  <option value="">None</option>
+                  {groups.map((group) => (
+                    <option key={group.id} value={group.id}>
+                      {group.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <label className="full-width">
+              <span>Tags (comma-separated)</span>
+              <input value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} />
+            </label>
+            <label className="full-width">
+              <span>Content (Markdown + [[wikilink]])</span>
+              <textarea
+                rows={14}
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+              />
+            </label>
+          </div>
+        </article>
+
+        <article className="tile notes-preview">
+          <h2>Preview</h2>
+          <div className="markdown-preview">{renderMarkdownPreview(content)}</div>
+          {resolvedWikilinks.length > 0 && (
+            <div className="notes-wikilinks">
+              <strong>Detected Wikilinks</strong>
+              <div className="chip-list">
+                {resolvedWikilinks.map((link) => (
+                  <button
+                    key={link.raw}
+                    type="button"
+                    className={link.status === "unresolved" ? "button-danger" : "button-secondary"}
+                    disabled={link.status === "unresolved"}
+                    onClick={() => openResolvedWikilink(link)}
+                  >
+                    [[{link.raw}]]
+                  </button>
+                ))}
+              </div>
+              <small>
+                Syntax: `[[leetcode]]`, `[[reading]]`, `[[note:Lecture Notes]]`, `[[calendar:Midterm]]`.
+              </small>
+            </div>
+          )}
+        </article>
+      </div>
     </PageCard>
   );
 }
@@ -3189,9 +3922,26 @@ function SettingsPage() {
   const syncMetadata = useAppStore((state) => state.leetCodeSyncMetadata);
   const updateSettings = useAppStore((state) => state.updateSettings);
   const runLeetCodeSync = useAppStore((state) => state.runLeetCodeSync);
+  const [notificationPermission, setNotificationPermission] = useState<string>(
+    typeof Notification === "undefined" ? "unsupported" : Notification.permission
+  );
 
   function onThemeChange(value: ThemePreference) {
     updateSettings({ themePreference: value });
+  }
+
+  useEffect(() => {
+    if (typeof Notification === "undefined") {
+      setNotificationPermission("unsupported");
+      return;
+    }
+    setNotificationPermission(Notification.permission);
+  }, []);
+
+  async function requestNotificationPermission() {
+    if (typeof Notification === "undefined") return;
+    const result = await Notification.requestPermission();
+    setNotificationPermission(result);
   }
 
   return (
@@ -3212,13 +3962,26 @@ function SettingsPage() {
         </label>
         <label className="setting-row">
           <span>Enable notifications</span>
-          <input
-            type="checkbox"
-            checked={settings.notificationsEnabled}
-            onChange={(event) =>
-              updateSettings({ notificationsEnabled: event.target.checked })
-            }
-          />
+          <div className="sync-box">
+            <input
+              type="checkbox"
+              checked={settings.notificationsEnabled}
+              onChange={(event) =>
+                updateSettings({ notificationsEnabled: event.target.checked })
+              }
+            />
+            <small>
+              Browser permission: {notificationPermission}
+            </small>
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => void requestNotificationPermission()}
+              disabled={notificationPermission === "granted" || notificationPermission === "unsupported"}
+            >
+              Request Browser Permission
+            </button>
+          </div>
         </label>
         <label className="setting-row">
           <span>Daily digest</span>
@@ -3265,6 +4028,17 @@ function SettingsPage() {
           />
         </label>
         <label className="setting-row">
+          <span>Review reminder time</span>
+          <input
+            type="time"
+            value={settings.reviewReminderTime}
+            disabled={!settings.notificationsEnabled || !settings.reviewRemindersEnabled}
+            onChange={(event) =>
+              updateSettings({ reviewReminderTime: event.target.value || "18:30" })
+            }
+          />
+        </label>
+        <label className="setting-row">
           <span>Streak reminders</span>
           <input
             type="checkbox"
@@ -3272,6 +4046,17 @@ function SettingsPage() {
             disabled={!settings.notificationsEnabled}
             onChange={(event) =>
               updateSettings({ streakRemindersEnabled: event.target.checked })
+            }
+          />
+        </label>
+        <label className="setting-row">
+          <span>Streak reminder time</span>
+          <input
+            type="time"
+            value={settings.streakReminderTime}
+            disabled={!settings.notificationsEnabled || !settings.streakRemindersEnabled}
+            onChange={(event) =>
+              updateSettings({ streakReminderTime: event.target.value || "20:00" })
             }
           />
         </label>
@@ -3317,6 +4102,28 @@ function SettingsPage() {
             <option value="dark">Dark</option>
             <option value="light">Light</option>
           </select>
+        </label>
+        <label className="setting-row">
+          <span>Accent color</span>
+          <div className="accent-picker-row">
+            <input
+              type="color"
+              value={settings.accentColor}
+              onChange={(event) => updateSettings({ accentColor: event.target.value })}
+            />
+            <div className="chip-list chip-list-inline">
+              {["#58a6ff", "#7ee787", "#d2a8ff", "#ffb86b", "#f47067"].map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  className="accent-swatch"
+                  style={{ background: color }}
+                  onClick={() => updateSettings({ accentColor: color })}
+                  aria-label={`Set accent ${color}`}
+                />
+              ))}
+            </div>
+          </div>
         </label>
         <label className="setting-row">
           <span>LeetCode Username</span>
@@ -3401,9 +4208,23 @@ function NotFoundPage() {
 
 export default function App() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const hydrated = useAppStore((state) => state.hydrated);
   const hydrate = useAppStore((state) => state.hydrate);
+  const settings = useAppStore((state) => state.settings);
+  const events = useAppStore((state) => state.events);
+  const notes = useAppStore((state) => state.notes);
+  const books = useAppStore((state) => state.books);
+  const groups = useAppStore((state) => state.groups);
+  const problems = useAppStore((state) => state.problems);
+  const knowledgePoints = useAppStore((state) => state.knowledgePoints);
   const themePreference = useAppStore((state) => state.settings.themePreference);
+  const accentColor = useAppStore((state) => state.settings.accentColor);
+  const notifiedReminderIdsRef = useRef<Set<string>>(new Set());
+  const [globalSearchQuery, setGlobalSearchQuery] = useState("");
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [topbarSearchOpen, setTopbarSearchOpen] = useState(false);
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
 
   useEffect(() => {
     void hydrate();
@@ -3412,6 +4233,319 @@ export default function App() {
   useEffect(() => {
     document.body.dataset.theme = themePreference;
   }, [themePreference]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--accent", accentColor || "#58a6ff");
+  }, [accentColor]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandPaletteOpen(true);
+        setTopbarSearchOpen(false);
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+        event.preventDefault();
+        navigate("/settings");
+      }
+      if ((event.metaKey || event.ctrlKey) && ["1", "2", "3", "4", "5", "6"].includes(event.key)) {
+        event.preventDefault();
+        const routeMap: Record<string, string> = {
+          "1": "/",
+          "2": "/leetcode",
+          "3": "/reading",
+          "4": "/calendar",
+          "5": "/notes",
+          "6": "/groups",
+        };
+        navigate(routeMap[event.key] ?? "/");
+      }
+      if (event.key === "?" || ((event.metaKey || event.ctrlKey) && event.key === "/")) {
+        event.preventDefault();
+        setShortcutHelpOpen(true);
+      }
+      if (event.key === "Escape") {
+        setCommandPaletteOpen(false);
+        setTopbarSearchOpen(false);
+        setShortcutHelpOpen(false);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navigate]);
+
+  const commandResults = useMemo(() => {
+    const q = globalSearchQuery.trim().toLowerCase();
+    const base = [
+      { id: "go-home", label: "Go to Dashboard", description: "Open dashboard", route: "/" },
+      { id: "go-leetcode", label: "Go to LeetCode", description: "Problem tracking", route: "/leetcode" },
+      { id: "go-reading", label: "Go to Reading", description: "Books and knowledge points", route: "/reading" },
+      { id: "go-calendar", label: "Go to Calendar", description: "Schedule and reminders", route: "/calendar" },
+      { id: "go-notes", label: "Go to Notes", description: "Quick notes and templates", route: "/notes" },
+      { id: "go-groups", label: "Go to Groups", description: "Study groups", route: "/groups" },
+      { id: "go-settings", label: "Go to Settings", description: "Preferences", route: "/settings" },
+    ];
+    const dynamic = [
+      ...notes.map((note) => ({
+        id: `note-${note.id}`,
+        label: `Note: ${note.title}`,
+        description: "Open Notes module",
+        route: "/notes",
+      })),
+      ...books.map((book) => ({
+        id: `book-${book.id}`,
+        label: `Book: ${book.title}`,
+        description: "Open Reading module",
+        route: "/reading",
+      })),
+      ...events.map((event) => ({
+        id: `event-${event.id}`,
+        label: `Event: ${event.title}`,
+        description: "Open Calendar module",
+        route: "/calendar",
+      })),
+      ...groups.map((group) => ({
+        id: `group-${group.id}`,
+        label: `Group: ${group.name}`,
+        description: "Open Groups module",
+        route: "/groups",
+      })),
+      ...problems.map((problem) => ({
+        id: `problem-${problem.id}`,
+        label: `Problem #${problem.problemNumber}: ${problem.title}`,
+        description: "Open LeetCode module",
+        route: "/leetcode",
+      })),
+      ...knowledgePoints.map((point) => ({
+        id: `kp-${point.id}`,
+        label: `Knowledge: ${point.title}`,
+        description: "Open Reading module",
+        route: "/reading",
+      })),
+    ];
+    const all = [...base, ...dynamic];
+    if (!q) return all.slice(0, 12);
+    return all
+      .filter(
+        (item) =>
+          item.label.toLowerCase().includes(q) ||
+          item.description.toLowerCase().includes(q)
+      )
+      .slice(0, 20);
+  }, [globalSearchQuery, notes, books, events, groups, problems, knowledgePoints]);
+
+  function runCommand(route: string) {
+    navigate(route);
+    setCommandPaletteOpen(false);
+    setTopbarSearchOpen(false);
+    setGlobalSearchQuery("");
+  }
+
+  useEffect(() => {
+    if (typeof Notification === "undefined") return;
+    if (!settings.notificationsEnabled) return;
+    if (Notification.permission !== "granted") return;
+
+    function isWithinQuietHours(date: Date): boolean {
+      if (!settings.quietHoursEnabled) return false;
+      const [startHour, startMinute] = settings.quietHoursStart.split(":").map(Number);
+      const [endHour, endMinute] = settings.quietHoursEnd.split(":").map(Number);
+      const startTotal = startHour * 60 + startMinute;
+      const endTotal = endHour * 60 + endMinute;
+      const currentTotal = date.getHours() * 60 + date.getMinutes();
+      if (startTotal === endTotal) return false;
+      if (startTotal < endTotal) {
+        return currentTotal >= startTotal && currentTotal < endTotal;
+      }
+      return currentTotal >= startTotal || currentTotal < endTotal;
+    }
+
+    function expandEventsInRange(rangeStart: Date, rangeEnd: Date): CalendarEvent[] {
+      const result: CalendarEvent[] = [];
+      for (const event of events) {
+        const recurrence = event.recurrence ?? "none";
+        if (recurrence === "none") {
+          const eventDate = new Date(event.startTime);
+          if (eventDate >= rangeStart && eventDate < rangeEnd) {
+            result.push(event);
+          }
+          continue;
+        }
+        const baseStart = new Date(event.startTime);
+        const baseEnd = new Date(event.endTime);
+        const durationMs = Math.max(baseEnd.getTime() - baseStart.getTime(), 30 * 60000);
+        const until = event.recurrenceUntil
+          ? new Date(`${event.recurrenceUntil}T23:59:59`)
+          : new Date(rangeEnd);
+        let cursor = new Date(baseStart);
+        let guard = 0;
+        while (cursor < rangeEnd && cursor <= until && guard < 500) {
+          if (cursor >= rangeStart) {
+            const occurrenceStart = new Date(cursor);
+            const occurrenceEnd = new Date(occurrenceStart.getTime() + durationMs);
+            result.push({
+              ...event,
+              startTime: occurrenceStart.toISOString(),
+              endTime: occurrenceEnd.toISOString(),
+            });
+          }
+          if (recurrence === "daily") {
+            cursor.setDate(cursor.getDate() + 1);
+          } else if (recurrence === "weekly") {
+            cursor.setDate(cursor.getDate() + 7);
+          } else {
+            cursor.setMonth(cursor.getMonth() + 1);
+          }
+          guard += 1;
+        }
+      }
+      return result;
+    }
+
+    function tick() {
+      const now = new Date();
+      const horizon = new Date(now);
+      horizon.setHours(horizon.getHours() + 24);
+      const triggerWindowMs = 45_000;
+      const todayKey = now.toISOString().slice(0, 10);
+      const todayAtConfigured = new Date(`${todayKey}T${settings.dailyDigestTime}:00`);
+      const todayAtReviewReminder = new Date(`${todayKey}T${settings.reviewReminderTime}:00`);
+      const todayAtStreakReminder = new Date(`${todayKey}T${settings.streakReminderTime}:00`);
+
+      if (settings.eventRemindersEnabled) {
+        const occurrences = expandEventsInRange(now, horizon)
+          .filter((event) => typeof event.reminderMinutesBefore === "number")
+          .map((event) => {
+            const reminderAt = new Date(
+              new Date(event.startTime).getTime() - (event.reminderMinutesBefore ?? 0) * 60000
+            );
+            const reminderKey = `${event.id}::${event.startTime}::${event.reminderMinutesBefore ?? 0}`;
+            return { event, reminderAt, reminderKey };
+          });
+
+        occurrences.forEach(({ event, reminderAt, reminderKey }) => {
+          const delta = now.getTime() - reminderAt.getTime();
+          if (delta < 0 || delta > triggerWindowMs) return;
+          if (notifiedReminderIdsRef.current.has(reminderKey)) return;
+          notifiedReminderIdsRef.current.add(reminderKey);
+          if (isWithinQuietHours(reminderAt)) return;
+
+          const title = `Upcoming: ${event.title}`;
+          const body = `${new Date(event.startTime).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })} • ${event.type}`;
+          new Notification(title, { body, tag: reminderKey });
+        });
+      }
+
+      if (settings.dailyDigestEnabled) {
+        const digestKey = `digest::${todayKey}`;
+        const delta = now.getTime() - todayAtConfigured.getTime();
+        if (
+          delta >= 0 &&
+          delta <= triggerWindowMs &&
+          !notifiedReminderIdsRef.current.has(digestKey)
+        ) {
+          notifiedReminderIdsRef.current.add(digestKey);
+          if (!isWithinQuietHours(now)) {
+            const todayEventCount = events.filter(
+              (event) => event.startTime.slice(0, 10) === todayKey
+            ).length;
+            const reviewDueProblems = problems.filter(
+              (item) =>
+                item.nextReviewDate &&
+                item.nextReviewDate.slice(0, 10) <= todayKey &&
+                (item.status === "Solved" || item.status === "Review")
+            ).length;
+            const reviewDueKnowledge = knowledgePoints.filter(
+              (point) =>
+                point.nextReviewDate && point.nextReviewDate.slice(0, 10) <= todayKey
+            ).length;
+            new Notification("Daily Study Digest", {
+              body: `Today: ${todayEventCount} events, ${reviewDueProblems} LeetCode reviews, ${reviewDueKnowledge} reading reviews.`,
+              tag: digestKey,
+            });
+          }
+        }
+      }
+
+      if (settings.streakRemindersEnabled) {
+        const streakKey = `streak::${todayKey}`;
+        const delta = now.getTime() - todayAtStreakReminder.getTime();
+        if (
+          delta >= 0 &&
+          delta <= triggerWindowMs &&
+          !notifiedReminderIdsRef.current.has(streakKey)
+        ) {
+          notifiedReminderIdsRef.current.add(streakKey);
+          if (!isWithinQuietHours(now)) {
+            const solvedToday = problems.some(
+              (item) =>
+                item.status === "Solved" &&
+                (item.dateSolved ?? item.updatedAt).slice(0, 10) === todayKey
+            );
+            if (!solvedToday) {
+              new Notification("Keep your streak alive", {
+                body: "Solve at least one problem today to maintain your LeetCode streak.",
+                tag: streakKey,
+              });
+            }
+          }
+        }
+      }
+
+      if (settings.reviewRemindersEnabled) {
+        const reviewKey = `review::${todayKey}`;
+        const delta = now.getTime() - todayAtReviewReminder.getTime();
+        if (
+          delta >= 0 &&
+          delta <= triggerWindowMs &&
+          !notifiedReminderIdsRef.current.has(reviewKey)
+        ) {
+          notifiedReminderIdsRef.current.add(reviewKey);
+          if (!isWithinQuietHours(now)) {
+            const reviewDueProblems = problems.filter(
+              (item) =>
+                item.nextReviewDate &&
+                item.nextReviewDate.slice(0, 10) <= todayKey &&
+                (item.status === "Solved" || item.status === "Review")
+            ).length;
+            const reviewDueKnowledge = knowledgePoints.filter(
+              (point) =>
+                point.nextReviewDate && point.nextReviewDate.slice(0, 10) <= todayKey
+            ).length;
+            if (reviewDueProblems + reviewDueKnowledge > 0) {
+              new Notification("Review queue due", {
+                body: `${reviewDueProblems} problems and ${reviewDueKnowledge} knowledge cards are due.`,
+                tag: reviewKey,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    tick();
+    const intervalId = window.setInterval(tick, 15_000);
+    return () => window.clearInterval(intervalId);
+  }, [
+    settings.notificationsEnabled,
+    settings.dailyDigestEnabled,
+    settings.dailyDigestTime,
+    settings.eventRemindersEnabled,
+    settings.reviewRemindersEnabled,
+    settings.reviewReminderTime,
+    settings.streakRemindersEnabled,
+    settings.streakReminderTime,
+    settings.quietHoursEnabled,
+    settings.quietHoursStart,
+    settings.quietHoursEnd,
+    events,
+    problems,
+    knowledgePoints,
+  ]);
 
   if (!hydrated) {
     return <div className="loading-screen">Loading your workspace...</div>;
@@ -3449,8 +4583,46 @@ export default function App() {
 
       <main className="main-layout">
         <header className="topbar">
-          <input type="search" placeholder={t("searchPlaceholder")} />
+          <div className="global-search-wrap">
+            <input
+              type="search"
+              placeholder={`${t("searchPlaceholder")} (⌘/Ctrl+K)`}
+              value={globalSearchQuery}
+              onChange={(event) => setGlobalSearchQuery(event.target.value)}
+              onFocus={() => setTopbarSearchOpen(true)}
+              onBlur={() => {
+                window.setTimeout(() => setTopbarSearchOpen(false), 120);
+              }}
+            />
+            {topbarSearchOpen && (
+              <div className="global-search-results">
+                {commandResults.length === 0 && <small>No results</small>}
+                {commandResults.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => runCommand(item.route)}
+                  >
+                    <strong>{item.label}</strong>
+                    <small>{item.description}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <button type="button">AI Panel</button>
+          <button
+            type="button"
+            onClick={() => {
+              setCommandPaletteOpen(true);
+              setTopbarSearchOpen(false);
+            }}
+          >
+            Command Palette
+          </button>
+          <button type="button" onClick={() => setShortcutHelpOpen(true)}>
+            Shortcuts
+          </button>
         </header>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
@@ -3464,6 +4636,52 @@ export default function App() {
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </main>
+      {commandPaletteOpen && (
+        <div className="command-palette-overlay" onClick={() => setCommandPaletteOpen(false)}>
+          <div className="command-palette" onClick={(event) => event.stopPropagation()}>
+            <input
+              autoFocus
+              type="search"
+              placeholder="Type a command or search..."
+              value={globalSearchQuery}
+              onChange={(event) => setGlobalSearchQuery(event.target.value)}
+            />
+            <div className="command-list">
+              {commandResults.length === 0 && <small>No matching command</small>}
+              {commandResults.map((item) => (
+                <button key={`cp-${item.id}`} type="button" onClick={() => runCommand(item.route)}>
+                  <strong>{item.label}</strong>
+                  <small>{item.description}</small>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+      {shortcutHelpOpen && (
+        <div className="command-palette-overlay" onClick={() => setShortcutHelpOpen(false)}>
+          <div className="command-palette" onClick={(event) => event.stopPropagation()}>
+            <h2>Keyboard Shortcuts</h2>
+            <div className="shortcut-list">
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>K</kbd> <span>Open command palette</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>1</kbd> <span>Go to Dashboard</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>2</kbd> <span>Go to LeetCode</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>3</kbd> <span>Go to Reading</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>4</kbd> <span>Go to Calendar</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>5</kbd> <span>Go to Notes</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>6</kbd> <span>Go to Groups</span></div>
+              <div><kbd>⌘/Ctrl</kbd> + <kbd>,</kbd> <span>Open Settings</span></div>
+              <div><kbd>?</kbd> <span>Open this shortcut help</span></div>
+              <div><kbd>Esc</kbd> <span>Close overlays</span></div>
+            </div>
+            <div className="actions-row">
+              <button type="button" onClick={() => setShortcutHelpOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

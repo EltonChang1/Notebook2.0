@@ -7,6 +7,7 @@ import type {
   UserSettings,
   Book,
   KnowledgePoint,
+  Note,
   LeetCodeSyncMetadata,
   SyncHistoryEntry,
 } from "../models/domain";
@@ -24,11 +25,14 @@ const defaultSettings: UserSettings = {
   dailyDigestTime: "08:00",
   eventRemindersEnabled: true,
   reviewRemindersEnabled: false,
+  reviewReminderTime: "18:30",
   streakRemindersEnabled: false,
+  streakReminderTime: "20:00",
   quietHoursEnabled: true,
   quietHoursStart: "23:00",
   quietHoursEnd: "07:00",
   themePreference: "dark",
+  accentColor: "#58a6ff",
   leetCodeUsername: "",
   aiApiKey: "",
   leetCodeGoal: 200,
@@ -63,6 +67,7 @@ type AppState = {
   problems: LeetCodeProblem[];
   books: Book[];
   knowledgePoints: KnowledgePoint[];
+  notes: Note[];
   events: CalendarEvent[];
   groups: StudyGroup[];
   settings: UserSettings;
@@ -93,6 +98,8 @@ type AppState = {
   deleteKnowledgePoint: (id: string) => void;
   upsertEvent: (input: Omit<CalendarEvent, "id" | "createdAt"> & { id?: string }) => void;
   deleteEvent: (id: string) => void;
+  upsertNote: (input: Omit<Note, "id" | "createdAt" | "updatedAt"> & { id?: string }) => void;
+  deleteNote: (id: string) => void;
   markKnowledgePointReviewResult: (id: string, result: ReviewResult) => void;
   markReviewResult: (id: string, result: ReviewResult) => void;
   setTopicNote: (topic: string, note: string) => void;
@@ -199,6 +206,7 @@ function toSnapshot(state: AppState): AppDataSnapshot {
     problems: state.problems,
     books: state.books,
     knowledgePoints: state.knowledgePoints,
+    notes: state.notes,
     events: state.events,
     groups: state.groups,
     settings: state.settings,
@@ -214,6 +222,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   problems: [],
   books: [],
   knowledgePoints: [],
+  notes: [],
   events: [],
   groups: [],
   settings: defaultSettings,
@@ -238,6 +247,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       problems: snapshot.problems,
       books: snapshot.books,
       knowledgePoints: snapshot.knowledgePoints ?? [],
+      notes: snapshot.notes ?? [],
       events: snapshot.events,
       groups: snapshot.groups,
       settings: { ...defaultSettings, ...(snapshot.settings ?? {}) },
@@ -429,6 +439,32 @@ export const useAppStore = create<AppState>((set, get) => ({
     const events = get().events.filter((event) => event.id !== id);
     set({ events });
     void saveSnapshot(toSnapshot({ ...get(), events }));
+  },
+  upsertNote(input) {
+    const now = new Date().toISOString();
+    const current = get().notes;
+    const existing = current.find((note) => note.id === input.id);
+    const nextNote: Note = {
+      id: input.id ?? crypto.randomUUID(),
+      title: input.title,
+      template: input.template,
+      content: input.content,
+      tags: input.tags,
+      linkedModule: input.linkedModule,
+      linkedItemId: input.linkedItemId,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    const notes = current.some((note) => note.id === nextNote.id)
+      ? current.map((note) => (note.id === nextNote.id ? nextNote : note))
+      : [nextNote, ...current];
+    set({ notes });
+    void saveSnapshot(toSnapshot({ ...get(), notes }));
+  },
+  deleteNote(id) {
+    const notes = get().notes.filter((note) => note.id !== id);
+    set({ notes });
+    void saveSnapshot(toSnapshot({ ...get(), notes }));
   },
   markKnowledgePointReviewResult(id, result) {
     const now = new Date().toISOString();

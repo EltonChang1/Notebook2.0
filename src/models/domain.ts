@@ -12,6 +12,12 @@ export type EventType =
   | "personal"
   | "custom";
 export type GroupRole = "owner" | "member";
+export type NoteTemplate =
+  | "custom"
+  | "lecture"
+  | "algorithm"
+  | "meeting"
+  | "weekly_reflection";
 
 export interface LeetCodeProblem {
   id: string;
@@ -87,6 +93,18 @@ export interface StudyGroup {
   createdAt: string;
 }
 
+export interface Note {
+  id: string;
+  title: string;
+  template: NoteTemplate;
+  content: string;
+  tags: string[];
+  linkedModule?: "leetcode" | "reading" | "calendar" | "groups";
+  linkedItemId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface UserSettings {
   aiEnabled: boolean;
   notificationsEnabled: boolean;
@@ -94,11 +112,14 @@ export interface UserSettings {
   dailyDigestTime: string;
   eventRemindersEnabled: boolean;
   reviewRemindersEnabled: boolean;
+  reviewReminderTime: string;
   streakRemindersEnabled: boolean;
+  streakReminderTime: string;
   quietHoursEnabled: boolean;
   quietHoursStart: string;
   quietHoursEnd: string;
   themePreference: ThemePreference;
+  accentColor: string;
   leetCodeUsername: string;
   aiApiKey: string;
   leetCodeGoal: number;
@@ -133,6 +154,7 @@ export interface AppDataSnapshot {
   problems: LeetCodeProblem[];
   books: Book[];
   knowledgePoints?: KnowledgePoint[];
+  notes?: Note[];
   events: CalendarEvent[];
   groups: StudyGroup[];
   settings: UserSettings;
