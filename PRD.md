@@ -883,26 +883,26 @@ NotificationPreference
 
 #### Pre-Phase 6 Hardening Improvements (non-blocking, added Apr 2026)
 
-- [ ] Split major pages into route-level lazy chunks (move each page to dedicated modules for smaller initial JS payload).
-- [ ] Add e2e smoke checks for critical pre-Phase 6 flows (auth, LeetCode sync, Reading CRUD, Calendar event CRUD, Notes save/search).
-- [ ] Add accessibility sanity pass before AI expansion (focus order, ARIA naming on mobile nav/cards, color contrast check).
+- [x] Split major pages into route-level lazy chunks (move each page to dedicated modules for smaller initial JS payload).
+- [x] Add e2e smoke checks for critical pre-Phase 6 flows (auth, LeetCode sync, Reading CRUD, Calendar event CRUD, Notes save/search).
+- [x] Add accessibility sanity pass before AI expansion (focus order, ARIA naming on mobile nav/cards, color contrast check).
 
 ### Phase 6 — AI Study Assistant (Weeks 24–28)
 
-- [ ] AI settings: master toggle, per-feature toggles, privacy disclosure
-- [ ] Free default model integration (Gemma 3 / Llama 4 Scout via Groq or Together)
-- [ ] BYOK (Bring Your Own Key): API key input, encrypted storage, model selector
-- [ ] Integrate claw-agent-devtools as AI backend (provider-agnostic abstraction)
-- [ ] AI Chat panel: collapsible side panel, context-aware, conversation history
-- [ ] Active model indicator banner ("Powered by ___")
-- [ ] LeetCode AI: progressive hints, solution explanation, pattern recognition
-- [ ] Reading AI: concept explainer, knowledge gap detector, chapter summarizer
-- [ ] Flashcard auto-generation from knowledge points
-- [ ] Calendar AI: smart scheduling, daily briefing generation
-- [ ] Study plan generator (goal-based, pushed to calendar)
-- [ ] Notes AI paste assist: large-paste popup, format choice (bullet/paragraph), apply mode (replace/insert-below)
-- [ ] Streaming responses for responsive UX
-- [ ] Rate limiting for free-tier users (~50 queries/day)
+- [x] AI settings: master toggle, per-feature toggles, privacy disclosure
+- [x] Free default model integration (Gemma 3 / Llama 4 Scout via Groq or Together)
+- [x] BYOK (Bring Your Own Key): API key input, encrypted storage, model selector
+- [x] Integrate claw-agent-devtools as AI backend (provider-agnostic abstraction)
+- [x] AI Chat panel: collapsible side panel, context-aware, conversation history
+- [x] Active model indicator banner ("Powered by ___")
+- [x] LeetCode AI: progressive hints, solution explanation, pattern recognition
+- [x] Reading AI: concept explainer, knowledge gap detector, chapter summarizer
+- [x] Flashcard auto-generation from knowledge points
+- [x] Calendar AI: smart scheduling, daily briefing generation
+- [x] Study plan generator (goal-based, pushed to calendar)
+- [x] Notes AI paste assist: large-paste popup, format choice (bullet/paragraph), apply mode (replace/insert-below)
+- [x] Streaming responses for responsive UX
+- [x] Rate limiting for free-tier users (~50 queries/day)
 
 ### Phase 7 — Study Groups & Collaboration (Weeks 29–34)
 

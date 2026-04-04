@@ -108,6 +108,7 @@ export interface Note {
 
 export interface UserSettings {
   aiEnabled: boolean;
+  aiBackend: "mock" | "claw_agent_devtools";
   aiProvider: "free_default" | "byok";
   aiModel: "gemma-3" | "llama-4-scout" | "gpt-4.1-mini";
   aiPrivacyAcknowledged: boolean;
@@ -131,6 +132,9 @@ export interface UserSettings {
   accentColor: string;
   leetCodeUsername: string;
   aiApiKey: string;
+  aiApiKeyEncrypted?: string;
+  aiByokRequirePassphrase?: boolean;
+  aiByokPassphraseHash?: string;
   leetCodeGoal: number;
 }
 

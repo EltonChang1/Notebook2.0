@@ -1,4 +1,6 @@
 import {
+  Suspense,
+  lazy,
   useEffect,
   useMemo,
   useRef,
@@ -33,6 +35,22 @@ import { useAppStore } from "./store/appStore";
 import { buildCsvTemplate, previewCsvImport } from "./lib/csvImport";
 import type { AiStreamRequest } from "./lib/ai";
 import { consumeAiQuota, sanitizeAiPrompt } from "./lib/aiSafety";
+import {
+  clearAiAuditEntries,
+  exportAiAuditReport,
+  getAiAuditEntries,
+  recordAiAuditEntry,
+  type AiAuditEntry,
+  verifyAiAuditChain,
+} from "./lib/aiAudit";
+import {
+  clearSessionUnlockedByokKey,
+  createPassphraseHash,
+  decryptAtRestSecret,
+  getSessionUnlockedByokKey,
+  setSessionUnlockedByokKey,
+  verifyPassphrase,
+} from "./lib/cryptoVault";
 import {
   getCurrentSession,
   isAuthConfigured,
@@ -74,6 +92,16 @@ const navItems: NavItem[] = [
   { to: "/notes", labelKey: "nav.notes", icon: "📝" },
   { to: "/groups", labelKey: "nav.groups", icon: "👥" },
 ];
+
+const LazyDashboardPage = lazy(() => import("./routes/DashboardPageRoute"));
+const LazyLeetCodePage = lazy(() => import("./routes/LeetCodePageRoute"));
+const LazyTopicDeepDivePage = lazy(() => import("./routes/TopicDeepDivePageRoute"));
+const LazyReadingPage = lazy(() => import("./routes/ReadingPageRoute"));
+const LazyCalendarPage = lazy(() => import("./routes/CalendarPageRoute"));
+const LazyNotesPage = lazy(() => import("./routes/NotesPageRoute"));
+const LazyGroupsPage = lazy(() => import("./routes/GroupsPageRoute"));
+const LazySettingsPage = lazy(() => import("./routes/SettingsPageRoute"));
+const LazyNotFoundPage = lazy(() => import("./routes/NotFoundPageRoute"));
 
 function PageCard({
   title,
@@ -261,7 +289,7 @@ function AuthPage({
   );
 }
 
-function DashboardPage() {
+export function DashboardPage() {
   const { t } = useTranslation();
   const problems = useAppStore((state) => state.problems);
   const settings = useAppStore((state) => state.settings);
@@ -867,7 +895,7 @@ function ProblemEditor({
   );
 }
 
-function LeetCodePage() {
+export function LeetCodePage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const settings = useAppStore((state) => state.settings);
@@ -1160,6 +1188,18 @@ function LeetCodePage() {
     }
     const quota = consumeAiQuota(settings.aiProvider);
     if (!quota.ok) {
+      recordAiAuditEntry({
+        module: "LeetCode",
+        action: `leetcode_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: 0,
+        sanitizedChars: 0,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_quota",
+      });
       setAiOutput(t("ai.messages.freeTierReached"));
       return;
     }
@@ -1173,17 +1213,43 @@ function LeetCodePage() {
       explain: `Explain an ideal solution for #${target.problemNumber} ${target.title} with intuition, complexity, and edge cases.`,
       pattern: `Identify likely patterns for #${target.problemNumber} ${target.title}. Mention what signals in prompt indicate each pattern.`,
     } as const;
-    const safePrompt = sanitizeAiPrompt(promptMap[mode]);
+    const rawPrompt = promptMap[mode];
+    const safePrompt = sanitizeAiPrompt(rawPrompt);
     if (!safePrompt) {
+      recordAiAuditEntry({
+        module: "LeetCode",
+        action: `leetcode_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawPrompt.length,
+        sanitizedChars: 0,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_validation",
+      });
       setAiOutput(t("ai.messages.invalidPrompt"));
       return;
     }
+    recordAiAuditEntry({
+      module: "LeetCode",
+      action: `leetcode_${mode}`,
+      provider: settings.aiProvider,
+      model: settings.aiModel,
+      promptChars: rawPrompt.length,
+      sanitizedChars: safePrompt.length,
+      quotaLimit: quota.limit,
+      quotaUsed: quota.used,
+      quotaRemaining: quota.remaining,
+      outcome: "allowed",
+    });
     setAiLoading(true);
     setAiOutput("");
     try {
       for await (const chunk of streamAiResponseLazy({
         prompt: safePrompt,
         moduleName: "LeetCode",
+        backend: settings.aiBackend,
         provider: settings.aiProvider,
         model: settings.aiModel,
         apiKey: settings.aiApiKey,
@@ -1193,6 +1259,32 @@ function LeetCodePage() {
       })) {
         setAiOutput((prev) => prev + chunk);
       }
+      recordAiAuditEntry({
+        module: "LeetCode",
+        action: `leetcode_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawPrompt.length,
+        sanitizedChars: safePrompt.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "success",
+      });
+    } catch {
+      recordAiAuditEntry({
+        module: "LeetCode",
+        action: `leetcode_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawPrompt.length,
+        sanitizedChars: safePrompt.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "error",
+      });
+      setAiOutput(t("ai.messages.providerError"));
     } finally {
       setAiLoading(false);
     }
@@ -1894,7 +1986,11 @@ function LeetCodePage() {
         {sortedFiltered.length > 0 && isMobileLeetCode && (
           <div className="leetcode-mobile-cards">
             {sortedFiltered.map((problem) => (
-              <article key={problem.id} className="leetcode-mobile-card">
+              <article
+                key={problem.id}
+                className="leetcode-mobile-card"
+                aria-label={`Problem ${problem.problemNumber} ${problem.title} ${problem.status}`}
+              >
                 <div className="leetcode-mobile-card-head">
                   <strong>
                     #{problem.problemNumber} {problem.title}
@@ -1995,7 +2091,7 @@ function LeetCodePage() {
   );
 }
 
-function TopicDeepDivePage() {
+export function TopicDeepDivePage() {
   const { t } = useTranslation();
   const params = useParams();
   const navigate = useNavigate();
@@ -2176,7 +2272,7 @@ function TopicDeepDivePage() {
   );
 }
 
-function ReadingPage() {
+export function ReadingPage() {
   const { t } = useTranslation();
   type GeneratedFlashcardDraft = {
     id: string;
@@ -2722,6 +2818,18 @@ function ReadingPage() {
     }
     const quota = consumeAiQuota(settings.aiProvider);
     if (!quota.ok) {
+      recordAiAuditEntry({
+        module: "Reading",
+        action: `reading_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: 0,
+        sanitizedChars: 0,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_quota",
+      });
       setAiReadingOutput(t("ai.messages.freeTierReached"));
       return;
     }
@@ -2750,11 +2858,36 @@ function ReadingPage() {
             .map((point) => `${point.title}: ${stripHtml(point.concept)}`)
             .join(" | ")}`,
     } as const;
-    const safePrompt = sanitizeAiPrompt(promptMap[mode]);
+    const rawPrompt = promptMap[mode];
+    const safePrompt = sanitizeAiPrompt(rawPrompt);
     if (!safePrompt) {
+      recordAiAuditEntry({
+        module: "Reading",
+        action: `reading_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawPrompt.length,
+        sanitizedChars: 0,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_validation",
+      });
       setAiReadingOutput(t("ai.messages.invalidPrompt"));
       return;
     }
+    recordAiAuditEntry({
+      module: "Reading",
+      action: `reading_${mode}`,
+      provider: settings.aiProvider,
+      model: settings.aiModel,
+      promptChars: rawPrompt.length,
+      sanitizedChars: safePrompt.length,
+      quotaLimit: quota.limit,
+      quotaUsed: quota.used,
+      quotaRemaining: quota.remaining,
+      outcome: "allowed",
+    });
 
     setAiReadingLoading(true);
     setAiReadingOutput("");
@@ -2762,6 +2895,7 @@ function ReadingPage() {
       for await (const chunk of streamAiResponseLazy({
         prompt: safePrompt,
         moduleName: "Reading",
+        backend: settings.aiBackend,
         provider: settings.aiProvider,
         model: settings.aiModel,
         apiKey: settings.aiApiKey,
@@ -2772,6 +2906,32 @@ function ReadingPage() {
       })) {
         setAiReadingOutput((prev) => prev + chunk);
       }
+      recordAiAuditEntry({
+        module: "Reading",
+        action: `reading_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawPrompt.length,
+        sanitizedChars: safePrompt.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "success",
+      });
+    } catch {
+      recordAiAuditEntry({
+        module: "Reading",
+        action: `reading_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawPrompt.length,
+        sanitizedChars: safePrompt.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "error",
+      });
+      setAiReadingOutput(t("ai.messages.providerError"));
     } finally {
       setAiReadingLoading(false);
     }
@@ -2840,6 +3000,18 @@ function ReadingPage() {
     }
     const quota = consumeAiQuota(settings.aiProvider);
     if (!quota.ok) {
+      recordAiAuditEntry({
+        module: "Reading",
+        action: "reading_flashcards",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: 0,
+        sanitizedChars: 0,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_quota",
+      });
       setAiFlashcardsOutput(t("ai.messages.freeTierReached"));
       return;
     }
@@ -2867,9 +3039,33 @@ function ReadingPage() {
     const prompt = `[FLASHCARDS] ${seedPayload}`;
     const safePrompt = sanitizeAiPrompt(prompt);
     if (!safePrompt) {
+      recordAiAuditEntry({
+        module: "Reading",
+        action: "reading_flashcards",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: prompt.length,
+        sanitizedChars: 0,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_validation",
+      });
       setAiFlashcardsOutput(t("ai.messages.invalidPrompt"));
       return;
     }
+    recordAiAuditEntry({
+      module: "Reading",
+      action: "reading_flashcards",
+      provider: settings.aiProvider,
+      model: settings.aiModel,
+      promptChars: prompt.length,
+      sanitizedChars: safePrompt.length,
+      quotaLimit: quota.limit,
+      quotaUsed: quota.used,
+      quotaRemaining: quota.remaining,
+      outcome: "allowed",
+    });
 
     setAiFlashcardsLoading(true);
     setAiFlashcardsOutput("");
@@ -2879,6 +3075,7 @@ function ReadingPage() {
       for await (const chunk of streamAiResponseLazy({
         prompt: safePrompt,
         moduleName: "Reading",
+        backend: settings.aiBackend,
         provider: settings.aiProvider,
         model: settings.aiModel,
         apiKey: settings.aiApiKey,
@@ -2895,6 +3092,32 @@ function ReadingPage() {
       if (parsed.length === 0) {
         setAiFlashcardsOutput(t("reading.flashcardsParseError"));
       }
+      recordAiAuditEntry({
+        module: "Reading",
+        action: "reading_flashcards",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: prompt.length,
+        sanitizedChars: safePrompt.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "success",
+      });
+    } catch {
+      recordAiAuditEntry({
+        module: "Reading",
+        action: "reading_flashcards",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: prompt.length,
+        sanitizedChars: safePrompt.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "error",
+      });
+      setAiFlashcardsOutput(t("ai.messages.providerError"));
     } finally {
       setAiFlashcardsLoading(false);
     }
@@ -3717,7 +3940,7 @@ function ReadingPage() {
   );
 }
 
-function CalendarPage() {
+export function CalendarPage() {
   const { t } = useTranslation();
   type CalendarViewEvent = CalendarEvent & {
     occurrenceId: string;
@@ -4275,6 +4498,18 @@ function CalendarPage() {
     }
     const quota = consumeAiQuota(settings.aiProvider);
     if (!quota.ok) {
+      recordAiAuditEntry({
+        module: "Calendar",
+        action: `calendar_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: 0,
+        sanitizedChars: 0,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_quota",
+      });
       setAiCalendarOutput(t("ai.messages.freeTierReached"));
       return;
     }
@@ -4283,17 +4518,45 @@ function CalendarPage() {
       .slice(0, 8)
       .map((event) => `${new Date(event.startTime).toLocaleString()} ${event.title}`)
       .join(" | ");
+    const solvedCount = problems.filter((problem) => problem.status === "Solved").length;
+    const goalTarget = Math.max(0, settings.leetCodeGoal);
+    const goalRemaining = Math.max(0, goalTarget - solvedCount);
     const focusBaseDate = focusDate || new Date().toISOString().slice(0, 10);
     const promptMap = {
       briefing: `Generate a concise daily briefing using these events: ${nextEvents}. Include priority order and likely risks.`,
       schedule: `Optimize my schedule to balance deep work and review sessions. Events snapshot: ${nextEvents}.`,
-      plan: `[CAL_PLAN] ${focusBaseDate}::Generate a 3-day study plan based on due reviews (${reviewDueProblemsCount} LeetCode, ${reviewDueKnowledgeCount} reading) and current events: ${nextEvents}. Return plan lines as PLAN_ITEM|title|YYYY-MM-DD|HH:mm|durationMinutes|type`,
+      plan: `[CAL_PLAN] ${focusBaseDate}::Generate a 3-day goal-based study plan. LeetCode solved=${solvedCount}, goal=${goalTarget}, remaining=${goalRemaining}. Due reviews: ${reviewDueProblemsCount} LeetCode, ${reviewDueKnowledgeCount} reading. Current events: ${nextEvents}. Return plan lines as PLAN_ITEM|title|YYYY-MM-DD|HH:mm|durationMinutes|type`,
     } as const;
-    const safePrompt = sanitizeAiPrompt(promptMap[mode]);
+    const rawPrompt = promptMap[mode];
+    const safePrompt = sanitizeAiPrompt(rawPrompt);
     if (!safePrompt) {
+      recordAiAuditEntry({
+        module: "Calendar",
+        action: `calendar_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawPrompt.length,
+        sanitizedChars: 0,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_validation",
+      });
       setAiCalendarOutput(t("ai.messages.invalidPrompt"));
       return;
     }
+    recordAiAuditEntry({
+      module: "Calendar",
+      action: `calendar_${mode}`,
+      provider: settings.aiProvider,
+      model: settings.aiModel,
+      promptChars: rawPrompt.length,
+      sanitizedChars: safePrompt.length,
+      quotaLimit: quota.limit,
+      quotaUsed: quota.used,
+      quotaRemaining: quota.remaining,
+      outcome: "allowed",
+    });
 
     setAiCalendarLoading(true);
     setAiCalendarOutput("");
@@ -4305,6 +4568,7 @@ function CalendarPage() {
       for await (const chunk of streamAiResponseLazy({
         prompt: safePrompt,
         moduleName: "Calendar",
+        backend: settings.aiBackend,
         provider: settings.aiProvider,
         model: settings.aiModel,
         apiKey: settings.aiApiKey,
@@ -4326,6 +4590,32 @@ function CalendarPage() {
           );
         }
       }
+      recordAiAuditEntry({
+        module: "Calendar",
+        action: `calendar_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawPrompt.length,
+        sanitizedChars: safePrompt.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "success",
+      });
+    } catch {
+      recordAiAuditEntry({
+        module: "Calendar",
+        action: `calendar_${mode}`,
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawPrompt.length,
+        sanitizedChars: safePrompt.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "error",
+      });
+      setAiCalendarOutput(t("ai.messages.providerError"));
     } finally {
       setAiCalendarLoading(false);
     }
@@ -5094,7 +5384,7 @@ function CalendarPage() {
   );
 }
 
-function NotesPage() {
+export function NotesPage() {
   const { t } = useTranslation();
   type PasteAssistState = {
     sourceText: string;
@@ -5388,6 +5678,18 @@ function NotesPage() {
     }
     const quota = consumeAiQuota(settings.aiProvider);
     if (!quota.ok) {
+      recordAiAuditEntry({
+        module: "Notes",
+        action: "notes_paste_assist",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: 0,
+        sanitizedChars: 0,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_quota",
+      });
       setPasteAssist((current) =>
         current ? { ...current, output: t("ai.messages.freeTierReached") } : current
       );
@@ -5402,11 +5704,35 @@ function NotesPage() {
       `${basePrompt}\n\nSource text:\n${pasteAssist.sourceText.slice(0, 9000)}`
     );
     if (!prompt) {
+      recordAiAuditEntry({
+        module: "Notes",
+        action: "notes_paste_assist",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: pasteAssist.sourceText.length,
+        sanitizedChars: 0,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_validation",
+      });
       setPasteAssist((current) =>
         current ? { ...current, output: t("ai.messages.invalidPrompt") } : current
       );
       return;
     }
+    recordAiAuditEntry({
+      module: "Notes",
+      action: "notes_paste_assist",
+      provider: settings.aiProvider,
+      model: settings.aiModel,
+      promptChars: pasteAssist.sourceText.length,
+      sanitizedChars: prompt.length,
+      quotaLimit: quota.limit,
+      quotaUsed: quota.used,
+      quotaRemaining: quota.remaining,
+      outcome: "allowed",
+    });
 
     setPasteAssist((current) => (current ? { ...current, loading: true, output: "" } : current));
     try {
@@ -5414,6 +5740,7 @@ function NotesPage() {
       for await (const chunk of streamAiResponseLazy({
         prompt,
         moduleName: "Notes",
+        backend: settings.aiBackend,
         provider: settings.aiProvider,
         model: settings.aiModel,
         apiKey: settings.aiApiKey,
@@ -5424,6 +5751,34 @@ function NotesPage() {
         full += chunk;
         setPasteAssist((current) => (current ? { ...current, output: full } : current));
       }
+      recordAiAuditEntry({
+        module: "Notes",
+        action: "notes_paste_assist",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: pasteAssist.sourceText.length,
+        sanitizedChars: prompt.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "success",
+      });
+    } catch {
+      recordAiAuditEntry({
+        module: "Notes",
+        action: "notes_paste_assist",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: pasteAssist.sourceText.length,
+        sanitizedChars: prompt.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "error",
+      });
+      setPasteAssist((current) =>
+        current ? { ...current, output: t("ai.messages.providerError") } : current
+      );
     } finally {
       setPasteAssist((current) => (current ? { ...current, loading: false } : current));
     }
@@ -5964,7 +6319,7 @@ function NotesPage() {
   );
 }
 
-function GroupsPage() {
+export function GroupsPage() {
   const { t } = useTranslation();
   return (
     <PageCard
@@ -5982,7 +6337,7 @@ function GroupsPage() {
   );
 }
 
-function SettingsPage() {
+export function SettingsPage() {
   const { t } = useTranslation();
   const settings = useAppStore((state) => state.settings);
   const syncMetadata = useAppStore((state) => state.leetCodeSyncMetadata);
@@ -5990,6 +6345,18 @@ function SettingsPage() {
   const runLeetCodeSync = useAppStore((state) => state.runLeetCodeSync);
   const [notificationPermission, setNotificationPermission] = useState<string>(
     typeof Notification === "undefined" ? "unsupported" : Notification.permission
+  );
+  const [vaultPassphrase, setVaultPassphrase] = useState("");
+  const [vaultPassphraseConfirm, setVaultPassphraseConfirm] = useState("");
+  const [unlockPassphrase, setUnlockPassphrase] = useState("");
+  const [vaultStatusMessage, setVaultStatusMessage] = useState("");
+  const [auditEntries, setAuditEntries] = useState<AiAuditEntry[]>([]);
+  const [auditChainValid, setAuditChainValid] = useState<boolean | null>(null);
+  const [auditBrokenIndex, setAuditBrokenIndex] = useState<number | null>(null);
+  const [auditEncryptExport, setAuditEncryptExport] = useState(false);
+  const [auditExportPassphrase, setAuditExportPassphrase] = useState("");
+  const [byokUnlocked, setByokUnlocked] = useState<boolean>(() =>
+    Boolean(getSessionUnlockedByokKey())
   );
 
   function onThemeChange(value: ThemePreference) {
@@ -6004,10 +6371,93 @@ function SettingsPage() {
     setNotificationPermission(Notification.permission);
   }, []);
 
+  useEffect(() => {
+    setByokUnlocked(Boolean(getSessionUnlockedByokKey()));
+  }, [settings.aiByokRequirePassphrase, settings.aiProvider]);
+
+  useEffect(() => {
+    void refreshAiAuditEntries();
+  }, []);
+
   async function requestNotificationPermission() {
     if (typeof Notification === "undefined") return;
     const result = await Notification.requestPermission();
     setNotificationPermission(result);
+  }
+
+  async function setByokPassphrase() {
+    if (vaultPassphrase.length < 8) {
+      setVaultStatusMessage(t("settings.byokPassphraseLengthError"));
+      return;
+    }
+    if (vaultPassphrase !== vaultPassphraseConfirm) {
+      setVaultStatusMessage(t("settings.byokPassphraseMismatch"));
+      return;
+    }
+    const hash = await createPassphraseHash(vaultPassphrase);
+    updateSettings({
+      aiByokRequirePassphrase: true,
+      aiByokPassphraseHash: hash,
+    });
+    setVaultPassphrase("");
+    setVaultPassphraseConfirm("");
+    setVaultStatusMessage(t("settings.byokPassphraseSaved"));
+  }
+
+  async function unlockByokForSession() {
+    if (!settings.aiByokPassphraseHash) {
+      setVaultStatusMessage(t("settings.byokNoPassphraseSet"));
+      return;
+    }
+    const valid = await verifyPassphrase(
+      unlockPassphrase,
+      settings.aiByokPassphraseHash
+    );
+    if (!valid) {
+      setVaultStatusMessage(t("settings.byokUnlockFailed"));
+      return;
+    }
+    const decrypted =
+      settings.aiApiKey.trim() ||
+      (settings.aiApiKeyEncrypted
+        ? await decryptAtRestSecret(settings.aiApiKeyEncrypted)
+        : "");
+    setSessionUnlockedByokKey(decrypted);
+    updateSettings({ aiApiKey: decrypted });
+    setUnlockPassphrase("");
+    setByokUnlocked(true);
+    setVaultStatusMessage(t("settings.byokUnlockedForSession"));
+  }
+
+  function lockByokForSession() {
+    clearSessionUnlockedByokKey();
+    updateSettings({ aiApiKey: "" });
+    setByokUnlocked(false);
+    setVaultStatusMessage(t("settings.byokLockedForSession"));
+  }
+
+  async function refreshAiAuditEntries() {
+    const entries = getAiAuditEntries(40);
+    setAuditEntries(entries);
+    const result = await verifyAiAuditChain(entries);
+    setAuditChainValid(result.valid);
+    setAuditBrokenIndex(typeof result.brokenIndex === "number" ? result.brokenIndex : null);
+  }
+
+  async function exportAiAuditJson() {
+    const report = await exportAiAuditReport({
+      encryptPassphrase: auditEncryptExport ? auditExportPassphrase : undefined,
+    });
+    const blob = new Blob([report.content], { type: "application/json;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = report.filename;
+    link.click();
+    URL.revokeObjectURL(url);
+    if (auditEncryptExport) {
+      setAuditExportPassphrase("");
+    }
   }
 
   return (
@@ -6025,6 +6475,21 @@ function SettingsPage() {
               updateSettings({ aiEnabled: event.target.checked })
             }
           />
+        </label>
+        <label className="setting-row">
+          <span>{t("settings.aiBackend")}</span>
+          <select
+            value={settings.aiBackend}
+            disabled={!settings.aiEnabled}
+            onChange={(event) =>
+              updateSettings({
+                aiBackend: event.target.value as "mock" | "claw_agent_devtools",
+              })
+            }
+          >
+            <option value="mock">{t("settings.backendMock")}</option>
+            <option value="claw_agent_devtools">{t("settings.backendClaw")}</option>
+          </select>
         </label>
         <label className="setting-row">
           <span>{t("settings.aiProvider")}</span>
@@ -6355,20 +6820,199 @@ function SettingsPage() {
         </div>
         <label className="setting-row">
           <span>{t("settings.aiApiKeyOptional")}</span>
-          <input
-            type="password"
-            placeholder="sk-..."
-            value={settings.aiApiKey}
-            disabled={!settings.aiEnabled || settings.aiProvider !== "byok"}
-            onChange={(event) => updateSettings({ aiApiKey: event.target.value })}
-          />
+          <div className="sync-box">
+            <input
+              type="password"
+              placeholder="sk-..."
+              value={settings.aiApiKey}
+              disabled={
+                !settings.aiEnabled ||
+                settings.aiProvider !== "byok" ||
+                (Boolean(settings.aiByokRequirePassphrase) && !byokUnlocked)
+              }
+              onChange={(event) => {
+                const value = event.target.value;
+                updateSettings({ aiApiKey: value });
+                if (byokUnlocked) {
+                  setSessionUnlockedByokKey(value);
+                }
+              }}
+            />
+            <label>
+              <input
+                type="checkbox"
+                checked={Boolean(settings.aiByokRequirePassphrase)}
+                disabled={!settings.aiEnabled || settings.aiProvider !== "byok"}
+                onChange={(event) =>
+                  updateSettings({ aiByokRequirePassphrase: event.target.checked })
+                }
+              />{" "}
+              {t("settings.byokRequirePassphrase")}
+            </label>
+            {settings.aiByokRequirePassphrase && (
+              <>
+                <div className="problem-form-grid">
+                  <label>
+                    <span>{t("settings.byokSetPassphrase")}</span>
+                    <input
+                      type="password"
+                      value={vaultPassphrase}
+                      onChange={(event) => setVaultPassphrase(event.target.value)}
+                      placeholder={t("settings.byokPassphrasePlaceholder")}
+                    />
+                  </label>
+                  <label>
+                    <span>{t("settings.byokConfirmPassphrase")}</span>
+                    <input
+                      type="password"
+                      value={vaultPassphraseConfirm}
+                      onChange={(event) => setVaultPassphraseConfirm(event.target.value)}
+                      placeholder={t("settings.byokPassphrasePlaceholder")}
+                    />
+                  </label>
+                </div>
+                <div className="actions-row">
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={() => void setByokPassphrase()}
+                  >
+                    {t("settings.byokSavePassphrase")}
+                  </button>
+                </div>
+                {!byokUnlocked && (
+                  <>
+                    <label>
+                      <span>{t("settings.byokUnlockForSession")}</span>
+                      <input
+                        type="password"
+                        value={unlockPassphrase}
+                        onChange={(event) => setUnlockPassphrase(event.target.value)}
+                        placeholder={t("settings.byokPassphrasePlaceholder")}
+                      />
+                    </label>
+                    <div className="actions-row">
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={() => void unlockByokForSession()}
+                      >
+                        {t("settings.byokUnlockButton")}
+                      </button>
+                    </div>
+                  </>
+                )}
+                {byokUnlocked && (
+                  <div className="actions-row">
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      onClick={lockByokForSession}
+                    >
+                      {t("settings.byokLockButton")}
+                    </button>
+                  </div>
+                )}
+                <small>
+                  {byokUnlocked
+                    ? t("settings.byokUnlockedState")
+                    : t("settings.byokLockedState")}
+                </small>
+              </>
+            )}
+            {vaultStatusMessage && <small>{vaultStatusMessage}</small>}
+          </div>
         </label>
+        <div className="setting-row">
+          <span>{t("settings.aiAuditTitle")}</span>
+          <div className="sync-box">
+            <div className="actions-row">
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => void refreshAiAuditEntries()}
+              >
+                {t("settings.refreshAudit")}
+              </button>
+              <button
+                type="button"
+                className="button-secondary"
+                disabled={auditEncryptExport && !auditExportPassphrase.trim()}
+                onClick={() => void exportAiAuditJson()}
+              >
+                {t("settings.exportAudit")}
+              </button>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => {
+                  clearAiAuditEntries();
+                  setAuditEntries([]);
+                  setAuditChainValid(true);
+                  setAuditBrokenIndex(null);
+                }}
+              >
+                {t("settings.clearAudit")}
+              </button>
+            </div>
+            <label>
+              <input
+                type="checkbox"
+                checked={auditEncryptExport}
+                onChange={(event) => setAuditEncryptExport(event.target.checked)}
+              />{" "}
+              {t("settings.auditEncryptExport")}
+            </label>
+            {auditEncryptExport && (
+              <label>
+                <span>{t("settings.auditExportPassphrase")}</span>
+                <input
+                  type="password"
+                  value={auditExportPassphrase}
+                  onChange={(event) => setAuditExportPassphrase(event.target.value)}
+                  placeholder={t("settings.auditExportPassphrasePlaceholder")}
+                />
+              </label>
+            )}
+            {auditChainValid !== null && (
+              <small>
+                {auditChainValid
+                  ? t("settings.auditChainValid")
+                  : t("settings.auditChainBroken", {
+                      index: auditBrokenIndex ?? -1,
+                    })}
+              </small>
+            )}
+            {auditEntries.length === 0 && <small>{t("settings.noAuditEntries")}</small>}
+            {auditEntries.length > 0 && (
+              <ul className="sync-history-list">
+                {auditEntries.slice(0, 20).map((entry) => (
+                  <li key={entry.id}>
+                    <strong>
+                      {entry.module} • {entry.action} • {entry.outcome}
+                    </strong>
+                    <small>{new Date(entry.at).toLocaleString()}</small>
+                    <small>
+                      {entry.provider} / {entry.model} • prompt {entry.sanitizedChars}/
+                      {entry.promptChars}
+                    </small>
+                    {typeof entry.quotaRemaining === "number" && (
+                      <small>
+                        quota {entry.quotaRemaining}/{entry.quotaLimit}
+                      </small>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
       </div>
     </PageCard>
   );
 }
 
-function NotFoundPage() {
+export function NotFoundPage() {
   const { t } = useTranslation();
   return (
     <PageCard
@@ -6580,8 +7224,20 @@ export default function App() {
   }
 
   async function sendAiMessage(message: string) {
+    const rawMessage = message;
     const trimmed = sanitizeAiPrompt(message, 6000);
-    if (!trimmed) return;
+    if (!trimmed) {
+      recordAiAuditEntry({
+        module: currentModuleLabel(location.pathname),
+        action: "chat_message",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawMessage.length,
+        sanitizedChars: 0,
+        outcome: "blocked_validation",
+      });
+      return;
+    }
     const userMessage: AiChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -6641,6 +7297,18 @@ export default function App() {
     }
     const quota = consumeAiQuota(settings.aiProvider);
     if (!quota.ok) {
+      recordAiAuditEntry({
+        module: currentModuleLabel(location.pathname),
+        action: "chat_message",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawMessage.length,
+        sanitizedChars: trimmed.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "blocked_quota",
+      });
       setAiMessages((prev) => [
         ...prev,
         {
@@ -6652,6 +7320,18 @@ export default function App() {
       ]);
       return;
     }
+    recordAiAuditEntry({
+      module: currentModuleLabel(location.pathname),
+      action: "chat_message",
+      provider: settings.aiProvider,
+      model: settings.aiModel,
+      promptChars: rawMessage.length,
+      sanitizedChars: trimmed.length,
+      quotaLimit: quota.limit,
+      quotaUsed: quota.used,
+      quotaRemaining: quota.remaining,
+      outcome: "allowed",
+    });
 
     setAiThinking(true);
     const assistantId = crypto.randomUUID();
@@ -6669,6 +7349,7 @@ export default function App() {
       for await (const chunk of streamAiResponseLazy({
         prompt: trimmed,
         moduleName,
+        backend: settings.aiBackend,
         provider: settings.aiProvider,
         model: settings.aiModel,
         apiKey: settings.aiApiKey,
@@ -6685,7 +7366,31 @@ export default function App() {
           )
         );
       }
+      recordAiAuditEntry({
+        module: moduleName,
+        action: "chat_message",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawMessage.length,
+        sanitizedChars: trimmed.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "success",
+      });
     } catch {
+      recordAiAuditEntry({
+        module: currentModuleLabel(location.pathname),
+        action: "chat_message",
+        provider: settings.aiProvider,
+        model: settings.aiModel,
+        promptChars: rawMessage.length,
+        sanitizedChars: trimmed.length,
+        quotaLimit: quota.limit,
+        quotaUsed: quota.used,
+        quotaRemaining: quota.remaining,
+        outcome: "error",
+      });
       setAiMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantId
@@ -6996,7 +7701,7 @@ export default function App() {
     <div className="app-root">
       <aside className="sidebar">
         <div className="brand">{t("appName")}</div>
-        <nav>
+        <nav aria-label="Primary Navigation">
           {navItems.map((item) => (
             <NavLink
               key={item.to}
@@ -7027,6 +7732,7 @@ export default function App() {
           <div className="global-search-wrap">
             <input
               type="search"
+              aria-label={t("searchPlaceholder")}
               placeholder={`${t("searchPlaceholder")} (⌘/Ctrl+K)`}
               value={globalSearchQuery}
               onChange={(event) => setGlobalSearchQuery(event.target.value)}
@@ -7089,17 +7795,19 @@ export default function App() {
             </span>
           )}
         </header>
-        <Routes>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/leetcode" element={<LeetCodePage />} />
-          <Route path="/leetcode/topic/:topicName" element={<TopicDeepDivePage />} />
-          <Route path="/reading" element={<ReadingPage />} />
-          <Route path="/calendar" element={<CalendarPage />} />
-          <Route path="/notes" element={<NotesPage />} />
-          <Route path="/groups" element={<GroupsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="*" element={<NotFoundPage />} />
-        </Routes>
+        <Suspense fallback={<PageCard title={t("appName")} subtitle={t("app.loadingWorkspace")} />}>
+          <Routes>
+            <Route path="/" element={<LazyDashboardPage />} />
+            <Route path="/leetcode" element={<LazyLeetCodePage />} />
+            <Route path="/leetcode/topic/:topicName" element={<LazyTopicDeepDivePage />} />
+            <Route path="/reading" element={<LazyReadingPage />} />
+            <Route path="/calendar" element={<LazyCalendarPage />} />
+            <Route path="/notes" element={<LazyNotesPage />} />
+            <Route path="/groups" element={<LazyGroupsPage />} />
+            <Route path="/settings" element={<LazySettingsPage />} />
+            <Route path="*" element={<LazyNotFoundPage />} />
+          </Routes>
+        </Suspense>
       </main>
       <nav className="mobile-bottom-nav" aria-label="Mobile Navigation">
         {navItems.map((item) => (
@@ -7127,7 +7835,13 @@ export default function App() {
       </nav>
       {commandPaletteOpen && (
         <div className="command-palette-overlay" onClick={() => setCommandPaletteOpen(false)}>
-          <div className="command-palette" onClick={(event) => event.stopPropagation()}>
+          <div
+            className="command-palette"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("topbar.commandPalette")}
+            onClick={(event) => event.stopPropagation()}
+          >
             <input
               autoFocus
               type="search"
@@ -7149,7 +7863,13 @@ export default function App() {
       )}
       {shortcutHelpOpen && (
         <div className="command-palette-overlay" onClick={() => setShortcutHelpOpen(false)}>
-          <div className="command-palette" onClick={(event) => event.stopPropagation()}>
+          <div
+            className="command-palette"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("shortcuts.title")}
+            onClick={(event) => event.stopPropagation()}
+          >
             <h2>{t("shortcuts.title")}</h2>
             <div className="shortcut-list">
               <div><kbd>⌘/Ctrl</kbd> + <kbd>K</kbd> <span>{t("shortcuts.openPalette")}</span></div>
@@ -7173,7 +7893,13 @@ export default function App() {
       )}
       {quickCaptureOpen && (
         <div className="command-palette-overlay" onClick={() => setQuickCaptureOpen(false)}>
-          <div className="quick-capture-modal" onClick={(event) => event.stopPropagation()}>
+          <div
+            className="quick-capture-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("quickCapture.title")}
+            onClick={(event) => event.stopPropagation()}
+          >
             <h3>{t("quickCapture.title")}</h3>
             <small>{t("quickCapture.subtitle")}</small>
             <label>

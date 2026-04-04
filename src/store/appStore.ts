@@ -20,6 +20,7 @@ import { previewCsvImport, type ParsedCsvProblem } from "../lib/csvImport";
 
 const defaultSettings: UserSettings = {
   aiEnabled: false,
+  aiBackend: "mock",
   aiProvider: "free_default",
   aiModel: "gemma-3",
   aiPrivacyAcknowledged: false,
@@ -43,6 +44,9 @@ const defaultSettings: UserSettings = {
   accentColor: "#58a6ff",
   leetCodeUsername: "",
   aiApiKey: "",
+  aiApiKeyEncrypted: undefined,
+  aiByokRequirePassphrase: false,
+  aiByokPassphraseHash: undefined,
   leetCodeGoal: 200,
 };
 

@@ -8,10 +8,12 @@ export type AiModuleName =
 
 export type AiProvider = "free_default" | "byok";
 export type AiModel = "gemma-3" | "llama-4-scout" | "gpt-4.1-mini";
+export type AiBackend = "mock" | "claw_agent_devtools";
 
 export type AiStreamRequest = {
   prompt: string;
   moduleName: AiModuleName;
+  backend?: AiBackend;
   provider: AiProvider;
   model: AiModel;
   apiKey?: string;
@@ -161,10 +163,51 @@ function buildContextAwareResponse(request: AiStreamRequest): string {
 export async function* streamAiResponse(
   request: AiStreamRequest
 ): AsyncGenerator<string> {
+  if (request.backend === "claw_agent_devtools") {
+    try {
+      yield* streamFromClawBackend(request);
+      return;
+    } catch {
+      // Fall back to local mock backend if claw bridge is unavailable.
+    }
+  }
   const text = buildContextAwareResponse(request);
   const tokens = text.split(/(\s+)/).filter(Boolean);
   for (const token of tokens) {
     yield token;
     await wait(22);
+  }
+}
+
+async function* streamFromClawBackend(request: AiStreamRequest): AsyncGenerator<string> {
+  const endpoint =
+    (typeof import.meta !== "undefined" &&
+      (import.meta.env?.VITE_CLAW_AGENT_STREAM_URL as string | undefined)) ||
+    "/api/claw-agent-devtools/stream";
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      prompt: request.prompt,
+      moduleName: request.moduleName,
+      provider: request.provider,
+      model: request.model,
+      apiKey: request.apiKey,
+      context: request.context ?? {},
+      stream: true,
+    }),
+  });
+  if (!response.ok || !response.body) {
+    throw new Error("claw backend unavailable");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    if (chunk) yield chunk;
   }
 }

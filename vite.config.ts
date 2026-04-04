@@ -23,8 +23,21 @@ export default defineConfig(({ mode }) => ({
       output: {
         manualChunks(id) {
           if (!id.includes("node_modules")) return;
-          if (id.includes("react") || id.includes("react-dom") || id.includes("scheduler")) {
+          if (
+            id.includes("/node_modules/react/") ||
+            id.includes("/node_modules/react-dom/") ||
+            id.includes("/node_modules/scheduler/")
+          ) {
             return "react-core";
+          }
+          if (id.includes("/node_modules/@tiptap/") || id.includes("/node_modules/prosemirror-")) {
+            return "editor";
+          }
+          if (id.includes("/node_modules/@supabase/")) {
+            return "supabase";
+          }
+          if (id.includes("/node_modules/react-window/")) {
+            return "react-window";
           }
           if (id.includes("react-router-dom") || id.includes("@remix-run/router")) {
             return "router";
