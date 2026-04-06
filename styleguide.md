@@ -1,308 +1,196 @@
-# Notebook 2.0 UI Style Guide
+# Notebook 2.0 — Style guide (visual & UI patterns only)
 
-## Purpose
+> **Scope:** This document covers **how the app looks and feels**—tokens, layout, components, motion, and accessibility *presentation*.  
+> **Product scope, features, and the Notion-template checklist** live in **[PRD.md](./PRD.md)** only.
 
-This style guide defines a **clean, minimal UI system** for Notebook 2.0 while preserving all functionality in `PRD.md`.
+**Goals**
 
-Goals:
-- Keep every feature and workflow from the PRD.
-- Improve visual clarity through whitespace, hierarchy, and subtle dividers.
-- Standardize components so future implementation stays consistent.
-
----
-
-## Design Principles
-
-1. **Calm by default**  
-   UI should feel quiet and focused: low visual noise, few competing accents.
-
-2. **Whitespace is structure**  
-   Use spacing to separate ideas before adding borders or color.
-
-3. **Subtle surfaces and dividers**  
-   Prefer light gray borders and gentle elevation over heavy cards/shadows.
-
-4. **One primary action per area**  
-   Each section has one clear main CTA; all other actions are secondary/tertiary.
-
-5. **Function-first clarity**  
-   Never hide core PRD functionality behind style decisions.
+- **Neat, clear, easy to scan** — calm hierarchy, generous whitespace, one obvious primary action per section.
+- **Consistent surfaces** — same card, button, and list language across modules.
+- **Dark and light** — both themes intentional and readable.
 
 ---
 
-## Layout System
+## Code layout (UI implementation)
 
-### Page Container
-- Max width: `1200px`
-- Horizontal padding: `24px desktop`, `16px tablet/mobile`
-- Vertical rhythm: `24px` between major sections
-
-### Grid
-- Use a 12-column mental model for desktop.
-- Standard tile gap: `16px`.
-- Mobile: collapse to single column; preserve action order by task priority.
-
-### Section Structure
-Each major section follows:
-1. `Section title`
-2. `One-line helper text`
-3. `Actions row`
-4. `Content body`
+| Item | Location / rule |
+|------|------------------|
+| **Path alias `@/`** | Maps to `src/` (`vite.config.ts`, `tsconfig.app.json`). |
+| **Shared UI** | **`src/components/ui/`** (e.g. `bento-grid.tsx`). |
+| **`cn()`** | **`src/lib/utils.ts`** — `clsx` + `tailwind-merge`. |
+| **Icons** | **`lucide-react`** for new work. |
+| **Dark mode** | Theme is `body[data-theme="dark"]`; Tailwind **`dark:`** must follow app theme, not only the OS. |
 
 ---
 
-## Color Palette
+## Design principles (visual)
 
-Use semantic tokens (not raw hex in components):
+1. **Calm by default** — Low noise; few competing accents.
+2. **Whitespace is structure** — Separate ideas with space before adding borders.
+3. **Subtle surfaces** — Light borders and gentle elevation; avoid heavy chrome.
+4. **One primary per area** — One filled / dominant CTA; everything else secondary or ghost.
+5. **Scannable** — Titles, meta lines, and actions align predictably (Notion-like *clarity*, not a Notion clone).
 
-- Primary: `#2563eb` (`--primary`) for main actions and key interactive elements.
-- Secondary: `#64748b` (`--secondary`) for supporting actions and secondary emphasis.
-- Background: `#f8f9fb` (`--bg`) for the main app canvas.
-- Surface: `#ffffff` (`--surface`) for cards, modals, and raised containers.
-- Text Primary: `#111827` (`--text-primary`) for headings and body copy.
-- Text Secondary: `#6b7280` (`--text-secondary`) for helper text, captions, placeholders.
-- Border: `#e5e7eb` (`--border`) for dividers and input outlines.
-- Success: `#16a34a` (`--success`)
-- Warning: `#d97706` (`--warning`)
-- Error: `#dc2626` (`--error`)
+---
 
-Supporting tokens:
-- `--surface-muted`: `#f3f4f6`
-- `--focus-ring`: `rgba(37, 99, 235, 0.35)`
-- `--accent`: user-selected accent color in Settings (used as a controlled override, not a new palette color).
+## Navigation & layout (visual)
 
-Dark mode should preserve the same semantic roles with equivalent contrast.
+- **Sidebar + main:** Clear active state; icon + label readable at a glance.
+- **Mobile bottom nav:** Same order as task priority; touch targets ≥ 44px where possible.
+- **Page structure (every major screen):**  
+  1. Page title + optional subtitle  
+  2. One-line helper (muted)  
+  3. Primary actions row  
+  4. Content body  
+- **Max content width:** ~`1200px`; comfortable horizontal padding (`24px` desktop, `16px` mobile).
+- **Section rhythm:** `24px` between major blocks; `16px` inside cards.
+
+---
+
+## Bento grid (dashboard quick access)
+
+Implemented in **`src/components/ui/bento-grid.tsx`**.
+
+- **Grid:** `1` column → `3` columns from `md`; optional **`colSpan: 2`** on desktop.
+- **Card shell:** `rounded-xl`, light border, white / black surface in dark mode, slight **hover lift** and soft shadow.
+- **Dot-grid texture:** Overlay uses **`inset-x-0 bottom-0 -top-3`** (extends **12px** above the inner box); inner gradient uses **`absolute inset-0`** with `bg-[length:4px_4px]` radial dots. Hover or **persistent hover** controls opacity of the overlay layer.
+- **Keyboard:** Navigating tiles must support **Enter** / **Space** when `onSelect` is set.
+
+---
+
+## Color (semantic)
+
+Prefer **CSS variables** from `src/styles.css` (`--text-primary`, `--border`, `--accent`, etc.). For Tailwind-heavy surfaces (e.g. bento), keep **light** neutrals and **dark:** mirrors with low contrast borders.
+
+| Role | Light intent | Dark intent |
+|------|----------------|-------------|
+| Canvas | Soft off-white / gray | Near-black |
+| Surface / card | White or subtle gray | Slightly lifted from canvas |
+| Text primary | Near-black | Near-white |
+| Text secondary | Mid gray | Muted gray |
+| Border | Light gray | Low-contrast line |
+| Primary CTA | Accent (Settings-driven `--accent` where used) | Same role, adjusted luminance |
+
+Do not introduce **ad hoc hex** for new screens if a token exists.
 
 ---
 
 ## Typography
 
-- Font Family: **Inter** (Google Fonts), with system-ui fallbacks.
-- Headings: semibold/bold with slightly tight tracking (`-0.01em` to `-0.02em`).
-- Body: regular weight.
-- Size Scale: `12 / 14 / 16 / 20 / 24 / 32 / 40 / 48px`.
-- Base body size: `14px` or `16px` depending on density context (stay consistent per page).
-- Heading hierarchy:
-  - Page title: `28/32`, semibold
-  - Section title: `18/24`, semibold
-  - Subsection title: `15/20`, medium
-- Helper/meta text: smaller size + `text-secondary`
-
-Rules:
-- Avoid all-caps labels except tiny badges.
-- Keep line length comfortable (`60-90` chars for paragraphs).
+- **Font:** Inter (or stack in `index.html` / CSS), system fallbacks.
+- **Scale (reference):** 12 / 14 / 16 / 20 / 24 / 32 px.
+- **Page title:** largest semibold on the page; tight tracking (`-0.01em` to `-0.02em`).
+- **Section titles:** clearly smaller than page title; **subsection** one step down again.
+- **Body:** 14–16px; one size per surface type, consistent per route.
+- **Meta / captions:** smaller + secondary color.
+- **Line length:** ~60–90 characters for paragraphs where possible.
+- Avoid all-caps except tiny badges.
 
 ---
 
-## Spacing Scale
+## Spacing & radius
 
-Use a 4px base unit. Allowed spacing values:
-- `4, 8, 12, 16, 24, 32, 40, 48, 64`
+- **Base unit:** 4px. Use **4, 8, 12, 16, 24, 32, 40, 48, 64**.
+- **Inside tight controls:** 8–12px. **Inside cards:** 16px. **Between cards:** 16–24px. **Between page sections:** 24–32px.
 
-Rules:
-- Inside compact controls: `8-12`
-- Inside cards/forms: `16`
-- Between cards/major blocks: `24`
-- Between page-level groups: `32`
-- Section breathing room on content-heavy pages: `48`
+**Radius**
 
----
-
-## Border Radius
-
-- Small (inputs, chips): `8px`
-- Medium (cards, buttons): `12px`
-- Large (modals, containers): `16px`
-- Full (avatars, pills): `9999px`
+- Small (inputs, chips): **8px**
+- Medium (cards, buttons): **12px** (`rounded-xl` on bento matches product cards)
+- Large (modals): **16px**
+- Pills: **9999px**
 
 ---
 
-## Shadows
+## Shadows & elevation
 
-- Subtle: `0 1px 2px rgba(0,0,0,0.05)`
-- Medium: `0 4px 12px rgba(0,0,0,0.1)`
-- Strong: `0 8px 24px rgba(0,0,0,0.15)`
-
-Usage rule for this product aesthetic:
-- Default to **Subtle** or no shadow.
-- Use **Medium** only for overlays (dropdowns/modals/popovers).
-- Avoid **Strong** in normal page layout to preserve the minimal look.
+- Default: **none** or very subtle (`0 1px 2px` class of shadow).
+- **Hover** on bento: light shadow as implemented in `bento-grid.tsx`.
+- Modals/dropdowns: slightly stronger than cards; avoid heavy depth on dense pages.
 
 ---
 
-## Divider and Surface Style
-
-- Default card:
-  - `background: var(--surface)`
-  - `border: 1px solid var(--border)`
-  - `border-radius: 12px`
-  - minimal/no shadow
-- Use horizontal dividers (`1px var(--border)`) between dense lists/sections.
-- Do not stack multiple strong borders; one boundary is enough.
-
----
-
-## Component Standards
+## Components (appearance)
 
 ### Buttons
-- Primary: solid accent, used once per section.
-- Secondary: neutral outline/subtle fill.
-- Danger: explicit red style for destructive actions.
-- Height: `36px` desktop, `40px` mobile.
-- Padding: `0 12px` (compact), `0 16px` (default).
-- Radius: `12px` (medium radius token).
-- Hover:
-  - Primary: slightly darker fill (`~6-8%` darker)
-  - Secondary: subtle surface tint + border darken
-- Focus-visible: always show `--focus-ring`.
 
-### Inputs / Select / Textarea
-- Single consistent height and radius.
-- Label always visible (not placeholder-only).
-- Error text below field in danger color.
-- Use muted helper text for format hints.
-- Input/Select height: `40px`; Textarea: min `88px`.
-- Horizontal padding: `12px`.
-- Radius: `8px` (small radius token).
-- Focus: `1px` border + outside ring using `--focus-ring`.
+- **Primary:** Solid accent; **one** per logical section.
+- **Secondary:** Outline or soft fill.
+- **Danger:** Distinct red for destructive actions.
+- Height ~**36–40px**; padding **12–16px** horizontal; **focus-visible** ring always.
 
-### Cards/Tiles
-- Prefer flatter cards with whitespace rather than heavy backgrounds.
-- Card header has title + optional helper text.
-- Place actions near content they affect.
-- Padding: `16px` standard, `24px` for major panels.
-- Radius: `12px` (medium token).
-- Border-first treatment; shadow optional and subtle.
+### Inputs
 
-### Badges/Chips
-- Use low-saturation backgrounds.
-- Keep text readable (AA contrast).
-- Limit simultaneous chip colors to reduce noise.
+- Consistent height (~40px), **8px** radius, visible **labels** (not placeholder-only).
+- Errors: text below in danger color.
 
-### Tables and Lists
-- Use zebra striping only if needed; default is clean rows + divider lines.
+### Cards / tiles (`.tile` and bento)
+
+- Border-first; padding **16px** default.
+- Header = title + optional helper; actions grouped with the content they affect.
+
+### Badges & chips
+
+- Low saturation; readable contrast; limit rainbow clutter.
+
+### Tables & lists
+
+- Clear row separation; optional zebra only if density demands it.
 - Sticky header for long tables.
-- Sort affordance visible but subtle.
 
 ---
 
-## Interaction Patterns
+## Motion
 
-### States
-- Required states for interactive elements:
-  - default
-  - hover
-  - active
-  - focus-visible
-  - disabled
+- **120–180ms** transitions; ease-out.
+- No distracting entrance animations on routine navigation.
 
-### Motion
-- Keep motion minimal and functional.
-- Transition duration: `120-180ms`.
-- Avoid large entrance animations.
+### Empty states
 
-### Empty States
-- Every module should have:
-  - concise empty message
-  - one next-step action button
-
-### Feedback
-- Inline status for sync/AI operations.
-- Use clear success/failure text; no ambiguous messages.
+- Short message + **one** clear next-step control.
 
 ---
 
-## Accessibility Requirements
+## Accessibility (UI)
 
-- Meet WCAG AA contrast for text and controls.
-- Keyboard-accessible for all workflows.
-- Visible focus ring on tab navigation.
-- Labels for all form controls.
-- Do not communicate status by color alone; pair with text/icon.
-
----
-
-## Module-Specific Guidelines
-
-These rules improve style only; they **must not remove PRD functionality**.
-
-### LeetCode Tracker
-- Keep dense data readable via row spacing and clear dividers.
-- Prioritize scanability: title, status, difficulty, topics.
-- AI panel should visually align with other module AI panels.
-
-### Reading Tracker
-- Bookshelf and knowledge list should feel calm and editorial.
-- Flashcard mode: single focal card, minimal distractions.
-- AI tools remain inline, with clear generated-output area.
-
-### Calendar
-- Time grid should use subtle separators and high-contrast text.
-- Event blocks should be color-coded but low-saturation.
-- AI plan drafts should look like editable form rows with clear selection controls.
-
-### Notes
-- Editor and preview columns need generous spacing.
-- Markdown preview should be typographically clean, not overly decorated.
-
-### Groups
-- Distinguish personal vs shared context with labels, not harsh colors.
-
-### Settings
-- Group toggles by category with section dividers.
-- Keep security/privacy controls visually prominent but not alarming.
+- Contrast toward **WCAG AA** for text and controls.
+- **Keyboard:** full tab order; **focus-visible** on interactive elements.
+- Status not by **color alone** — add text or icon.
+- Meaningful **labels** and **aria** on custom controls (e.g. role="button" on bento tiles).
 
 ---
 
-## AI UI Consistency
+## Module visual notes
 
-All AI surfaces (chat + module assistants) should share:
-- Same panel shape, spacing, and typography.
-- Same loading and error message patterns.
-- Same “model/provider transparency” style.
-- Clearly separated:
-  - prompt/actions
-  - streaming output
-  - editable artifacts (draft plans/flashcards)
+Use the same **tile / section** pattern everywhere; only **density** changes.
 
----
-
-## Implementation Rules for Future Work
-
-When building new UI:
-1. Start with existing functionality from `PRD.md`.
-2. Apply this style guide tokens/layout before adding custom variants.
-3. Reuse existing component patterns when possible.
-4. Add new styles only if no existing pattern fits.
-5. Prefer semantic class names and avoid one-off style hacks.
-
-Global style rules:
-1. Never introduce colors outside this palette.
-2. Always use the spacing scale; no arbitrary spacing values.
-3. Maintain consistent border radius per element type.
-4. When in doubt, increase whitespace; this aesthetic should breathe.
+| Area | Visual note |
+|------|-------------|
+| **LeetCode** | Dense table: row height, dividers, readable tags. |
+| **Reading** | Editorial calm; flashcard = single focal card. |
+| **Calendar** | Grid lines subtle; event blocks readable, not neon. |
+| **Notes** | Editor column spacing; preview typography clean. |
+| **Groups** | Shared vs personal = label/badge, not harsh color split. |
+| **Settings** | Grouped sections with dividers; privacy blocks clear but calm. |
+| **AI panels** | Same panel chrome everywhere; clear separation of prompt / output / drafts. |
 
 ---
 
-## “Do / Don’t” Quick Reference
+## Do / don’t
 
-Do:
-- Use whitespace and light gray dividers for structure.
-- Keep pages visually quiet and easy to scan.
-- Keep CTA hierarchy clear.
-
-Don’t:
-- Add heavy shadows, thick borders, or overly saturated backgrounds.
-- Introduce multiple competing accent colors in one view.
-- Hide core actions behind style-only simplification.
+**Do:** Whitespace, light borders, clear type hierarchy, consistent bento language on home.  
+**Don’t:** Heavy shadows everywhere, many accent colors in one view, hiding actions behind purely visual minimalism.
 
 ---
 
-## Definition of Done (UI)
+## Definition of done (UI)
 
-A feature UI update is complete when:
-- It preserves all required function from `PRD.md`.
-- It follows spacing/color/typography rules above.
-- It includes keyboard/focus/error states.
-- It passes basic responsive checks (mobile + desktop).
-- It remains visually consistent with existing module patterns.
+- Matches **tokens and patterns** in this guide.
+- **Dark + light** both usable.
+- **Keyboard** and **focus** sane on new interactives.
+- **Responsive:** readable on narrow viewports; nav pattern from PRD preserved.
+- **Bento** (if touched): dot overlay geometry unchanged unless this doc is updated.
+
+---
+
+*End of styleguide.md*
