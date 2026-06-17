@@ -1,8 +1,7 @@
 # Notebook 2.0
 
-Trying to be a better version of NotebookLM, and will start working on it :)
 
-Notebook app for CS students, built from `PRD.md`.
+Notebook app student, able to create mindgraph given context
 
 ## Getting Started
 
